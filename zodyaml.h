@@ -119,6 +119,16 @@ const zod_yaml_node *zod_yaml_val_at(const zod_yaml_node *map, size_t index);
 
 #define ZOD_YAML_AREA_BLOCK_CAP 4096
 #define ZOD_YAML_KEY_SEP        ':'
+#define ZOD_YAML_ITEM_MARK      '-'
+#define ZOD_YAML_QUOTE          '"'
+#define ZOD_YAML_ESCAPE         '\\'
+#define ZOD_YAML_RESERVED_LEAD  "|>&*!"
+#define ZOD_YAML_MSG_RESERVED   "block scalar, anchor, alias and tag syntax is not supported"
+#define ZOD_YAML_LIST_OPEN      '['
+#define ZOD_YAML_LIST_CLOSE     ']'
+#define ZOD_YAML_MAP_OPEN       '{'
+#define ZOD_YAML_MAP_CLOSE      '}'
+#define ZOD_YAML_FLOW_SEP       ','
 #define ZOD_YAML_MSG_NOMEM      "out of memory"
 #define ZOD_YAML_MSG_INDENT     "unexpected indentation"
 #define ZOD_YAML_MAX_ENTRIES    1024
@@ -292,6 +302,9 @@ typedef struct zod_yaml_internal_parser {
     size_t          pos;
     int             line_number;
     zod_yaml_error *err;
+
+    zod_yaml_internal_line pending;
+    int                    has_pending;
 } zod_yaml_internal_parser;
 
 typedef enum zod_yaml_internal_next {
@@ -307,6 +320,7 @@ static void zod_yaml_internal_parser_init(zod_yaml_internal_parser *parser, cons
     parser->pos         = 0;
     parser->line_number = 0;
     parser->err         = err;
+    parser->has_pending = 0;
 }
 
 static size_t zod_yaml_internal_strip_len(const char *data, size_t len) {
@@ -348,6 +362,12 @@ static int zod_yaml_internal_doc_marker(zod_yaml_internal_string_view text, int 
 
 static zod_yaml_internal_next zod_yaml_internal_next_line(zod_yaml_internal_parser *parser,
                                                           zod_yaml_internal_line   *line) {
+    if (parser->has_pending) {
+        *line               = parser->pending;
+        parser->has_pending = 0;
+        return ZOD_YAML_NEXT_LINE;
+    }
+
     while (parser->pos < parser->len) {
         const char *start = parser->text + parser->pos;
         size_t      avail = parser->len - parser->pos;
@@ -387,10 +407,32 @@ static zod_yaml_internal_next zod_yaml_internal_next_line(zod_yaml_internal_pars
     return ZOD_YAML_NEXT_END;
 }
 
+static size_t zod_yaml_internal_quote_end(zod_yaml_internal_string_view text) {
+    for (size_t i = 1; i < text.len; i++) {
+        if (text.data[i] == ZOD_YAML_ESCAPE) {
+            i++;
+            continue;
+        }
+        if (text.data[i] == ZOD_YAML_QUOTE) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
 static int zod_yaml_internal_split(zod_yaml_internal_string_view  text,
                                    zod_yaml_internal_string_view *key,
                                    zod_yaml_internal_string_view *value) {
-    for (size_t i = 0; i < text.len; i++) {
+    size_t start = 0;
+
+    if (text.len > 0 && text.data[0] == ZOD_YAML_QUOTE) {
+        start = zod_yaml_internal_quote_end(text);
+        if (start == 0) {
+            return 0;
+        }
+    }
+
+    for (size_t i = start; i < text.len; i++) {
         int ends_key =
             text.data[i] == ZOD_YAML_KEY_SEP && (i + 1 == text.len || text.data[i + 1] == ' ');
         if (!ends_key) {
@@ -414,14 +456,70 @@ static int zod_yaml_internal_split(zod_yaml_internal_string_view  text,
     return 0;
 }
 
-static zod_yaml_scalar_style zod_yaml_internal_unquote(zod_yaml_internal_string_view *value) {
-    int quoted = value->len >= 2 && value->data[0] == '"' && value->data[value->len - 1] == '"';
-    if (!quoted) {
-        return ZOD_YAML_PLAIN;
+static zod_yaml_status zod_yaml_internal_text(zod_yaml_internal_parser     *parser,
+                                              zod_yaml_internal_area       *area,
+                                              const zod_yaml_internal_line *line,
+                                              zod_yaml_internal_string_view raw, const char **out,
+                                              zod_yaml_scalar_style *style) {
+    int column = line->indent + 1 + (int)(raw.data - line->text.data);
+
+    if (style != NULL) {
+        *style = ZOD_YAML_PLAIN;
     }
 
-    *value = zod_yaml_internal_sv(value->data + 1, value->len - 2);
-    return ZOD_YAML_QUOTED;
+    if (raw.len == 0 || raw.data[0] != ZOD_YAML_QUOTE) {
+        *out = zod_yaml_internal_area_copy(area, raw);
+        if (*out == NULL) {
+            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
+            return ZOD_YAML_ERR_NOMEM;
+        }
+        return ZOD_YAML_OK;
+    }
+
+    char *copy = zod_yaml_internal_area_alloc(area, raw.len, 1);
+    if (copy == NULL) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
+        return ZOD_YAML_ERR_NOMEM;
+    }
+
+    size_t used = 0;
+    for (size_t i = 1; i < raw.len; i++) {
+        char ch = raw.data[i];
+
+        if (ch == ZOD_YAML_QUOTE) {
+            if (i + 1 != raw.len) {
+                zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, line->number,
+                                   column + (int)i + 1, "text after closing quote");
+                return ZOD_YAML_ERR_SYNTAX;
+            }
+
+            copy[used] = '\0';
+            *out       = copy;
+            if (style != NULL) {
+                *style = ZOD_YAML_QUOTED;
+            }
+            return ZOD_YAML_OK;
+        }
+
+        if (ch == ZOD_YAML_ESCAPE) {
+            i++;
+            if (i >= raw.len) {
+                break;
+            }
+
+            ch = raw.data[i];
+            if (ch != ZOD_YAML_QUOTE && ch != ZOD_YAML_ESCAPE) {
+                zod_yaml_set_error(parser->err, ZOD_YAML_ERR_UNSUPPORTED, line->number,
+                                   column + (int)i - 1, "unsupported escape sequence");
+                return ZOD_YAML_ERR_UNSUPPORTED;
+            }
+        }
+        copy[used++] = ch;
+    }
+
+    zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, line->number, column,
+                       "unterminated quoted string");
+    return ZOD_YAML_ERR_SYNTAX;
 }
 
 static zod_yaml_internal_next zod_yaml_internal_peek(const zod_yaml_internal_parser *parser,
@@ -456,9 +554,426 @@ static int zod_yaml_internal_has_key(const zod_yaml_node_entry *entries, size_t 
     return 0;
 }
 
-static zod_yaml_status zod_yaml_internal_parse_map(zod_yaml_internal_parser *parser,
-                                                   zod_yaml_internal_area *area, int indent,
-                                                   int depth, zod_yaml_node *out);
+static int zod_yaml_internal_reserved(zod_yaml_internal_string_view text) {
+    return text.len > 0 && strchr(ZOD_YAML_RESERVED_LEAD, text.data[0]) != NULL;
+}
+
+static int zod_yaml_internal_is_item(zod_yaml_internal_string_view text) {
+    return text.len > 0 && text.data[0] == ZOD_YAML_ITEM_MARK &&
+           (text.len == 1 || text.data[1] == ' ');
+}
+
+static int zod_yaml_internal_item_text(zod_yaml_internal_string_view  text,
+                                       zod_yaml_internal_string_view *item) {
+    if (!zod_yaml_internal_is_item(text)) {
+        return 0;
+    }
+
+    size_t pos = 1;
+    while (pos < text.len && text.data[pos] == ' ') {
+        pos++;
+    }
+
+    *item = zod_yaml_internal_sv(text.data + pos, text.len - pos);
+    return 1;
+}
+
+static zod_yaml_status zod_yaml_internal_next_entry(zod_yaml_internal_parser *parser, int indent,
+                                                    zod_yaml_internal_line *line) {
+    if (zod_yaml_internal_next_line(parser, line) != ZOD_YAML_NEXT_LINE) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, parser->line_number, 0,
+                           "unexpected end of input");
+        return ZOD_YAML_ERR_SYNTAX;
+    }
+    if (line->indent != indent) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, line->number, line->indent + 1,
+                           ZOD_YAML_MSG_INDENT);
+        return ZOD_YAML_ERR_SYNTAX;
+    }
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_open(zod_yaml_internal_parser *parser, int indent,
+                                              int depth, size_t *count) {
+    zod_yaml_status status;
+
+    if (depth > ZOD_YAML_MAX_DEPTH) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_DEPTH, parser->line_number, 0,
+                           "nesting too deep");
+        return ZOD_YAML_ERR_DEPTH;
+    }
+
+    *count = zod_yaml_internal_count(*parser, indent, &status);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+    if (*count > ZOD_YAML_MAX_ENTRIES) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_TOO_LARGE, parser->line_number, 0,
+                           "too many entries in block");
+        return ZOD_YAML_ERR_TOO_LARGE;
+    }
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_parse_block(zod_yaml_internal_parser     *parser,
+                                                     zod_yaml_internal_area       *area,
+                                                     const zod_yaml_internal_line *first, int depth,
+                                                     zod_yaml_node *out);
+
+typedef enum zod_yaml_internal_flow_mode {
+    ZOD_YAML_FLOW_VALUE = 0,
+    ZOD_YAML_FLOW_KEY
+} zod_yaml_internal_flow_mode;
+
+typedef struct zod_yaml_internal_flow {
+    zod_yaml_internal_parser     *parser;
+    zod_yaml_internal_area       *area;
+    const zod_yaml_internal_line *line;
+    zod_yaml_internal_string_view raw;
+    size_t                        pos;
+} zod_yaml_internal_flow;
+
+static int zod_yaml_internal_flow_start(zod_yaml_internal_string_view text) {
+    return text.len > 0 &&
+           (text.data[0] == ZOD_YAML_LIST_OPEN || text.data[0] == ZOD_YAML_MAP_OPEN);
+}
+
+static void zod_yaml_internal_flow_error(const zod_yaml_internal_flow *flow, zod_yaml_status status,
+                                         const char *message) {
+    int column =
+        flow->line->indent + 1 + (int)(flow->raw.data - flow->line->text.data) + (int)flow->pos;
+
+    zod_yaml_set_error(flow->parser->err, status, flow->line->number, column, message);
+}
+
+static void zod_yaml_internal_flow_skip(zod_yaml_internal_flow *flow) {
+    while (flow->pos < flow->raw.len && flow->raw.data[flow->pos] == ' ') {
+        flow->pos++;
+    }
+}
+
+static int zod_yaml_internal_flow_at(const zod_yaml_internal_flow *flow, char ch) {
+    return flow->pos < flow->raw.len && flow->raw.data[flow->pos] == ch;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_count(zod_yaml_internal_flow *flow, size_t *count) {
+    size_t nesting = 0;
+    size_t commas  = 0;
+    int    any     = 0;
+
+    for (size_t i = flow->pos; i < flow->raw.len; i++) {
+        char ch = flow->raw.data[i];
+
+        if (ch == ZOD_YAML_QUOTE) {
+            size_t end = zod_yaml_internal_quote_end(
+                zod_yaml_internal_sv(flow->raw.data + i, flow->raw.len - i));
+            if (end == 0) {
+                flow->pos = i;
+                zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX,
+                                             "unterminated quoted string");
+                return ZOD_YAML_ERR_SYNTAX;
+            }
+
+            i += end - 1;
+            any = 1;
+            continue;
+        }
+
+        if (ch == ZOD_YAML_LIST_OPEN || ch == ZOD_YAML_MAP_OPEN) {
+            nesting++;
+            any = 1;
+            continue;
+        }
+
+        if (ch == ZOD_YAML_LIST_CLOSE || ch == ZOD_YAML_MAP_CLOSE) {
+            if (nesting == 0) {
+                *count = any ? commas + 1 : 0;
+                return ZOD_YAML_OK;
+            }
+            nesting--;
+            continue;
+        }
+
+        if (ch == ZOD_YAML_FLOW_SEP && nesting == 0) {
+            commas++;
+            continue;
+        }
+        any |= ch != ' ';
+    }
+
+    flow->pos = flow->raw.len;
+    zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX, "unterminated flow collection");
+    return ZOD_YAML_ERR_SYNTAX;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_scalar(zod_yaml_internal_flow        *flow,
+                                                     zod_yaml_internal_flow_mode    mode,
+                                                     zod_yaml_internal_string_view *slice) {
+    const char *data = flow->raw.data;
+    size_t      len  = flow->raw.len;
+
+    zod_yaml_internal_flow_skip(flow);
+    size_t start = flow->pos;
+
+    if (zod_yaml_internal_flow_at(flow, ZOD_YAML_QUOTE)) {
+        size_t end = zod_yaml_internal_quote_end(zod_yaml_internal_sv(data + start, len - start));
+        if (end == 0) {
+            zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX, "unterminated quoted string");
+            return ZOD_YAML_ERR_SYNTAX;
+        }
+
+        flow->pos += end;
+        *slice = zod_yaml_internal_sv(data + start, end);
+        return ZOD_YAML_OK;
+    }
+
+    while (flow->pos < len) {
+        char ch       = data[flow->pos];
+        char next     = flow->pos + 1 < len ? data[flow->pos + 1] : ' ';
+        int  ends_key = mode == ZOD_YAML_FLOW_KEY && ch == ZOD_YAML_KEY_SEP &&
+                        (next == ' ' || next == ZOD_YAML_FLOW_SEP || next == ZOD_YAML_MAP_CLOSE);
+
+        if (ch == ZOD_YAML_FLOW_SEP || ch == ZOD_YAML_LIST_CLOSE || ch == ZOD_YAML_MAP_CLOSE ||
+            ends_key) {
+            break;
+        }
+        flow->pos++;
+    }
+
+    size_t end = flow->pos;
+    while (end > start && data[end - 1] == ' ') {
+        end--;
+    }
+
+    *slice = zod_yaml_internal_sv(data + start, end - start);
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_parse(zod_yaml_internal_flow *flow, int depth,
+                                                    zod_yaml_node *out);
+
+static zod_yaml_status zod_yaml_internal_flow_item(zod_yaml_internal_flow *flow, int depth,
+                                                   zod_yaml_node *node) {
+    zod_yaml_internal_string_view slice, key, value;
+    zod_yaml_scalar_style         style;
+    const char                   *text;
+
+    node->line = flow->line->number;
+    zod_yaml_internal_flow_skip(flow);
+
+    zod_yaml_internal_string_view rest =
+        zod_yaml_internal_sv(flow->raw.data + flow->pos, flow->raw.len - flow->pos);
+    if (zod_yaml_internal_flow_start(rest)) {
+        return zod_yaml_internal_flow_parse(flow, depth + 1, node);
+    }
+
+    zod_yaml_status status = zod_yaml_internal_flow_scalar(flow, ZOD_YAML_FLOW_VALUE, &slice);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+    if (slice.len == 0) {
+        zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX, "empty flow item");
+        return ZOD_YAML_ERR_SYNTAX;
+    }
+    if (zod_yaml_internal_reserved(slice)) {
+        zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_UNSUPPORTED, ZOD_YAML_MSG_RESERVED);
+        return ZOD_YAML_ERR_UNSUPPORTED;
+    }
+    if (zod_yaml_internal_split(slice, &key, &value)) {
+        zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_UNSUPPORTED,
+                                     "single-pair maps in flow collections are not supported");
+        return ZOD_YAML_ERR_UNSUPPORTED;
+    }
+
+    status = zod_yaml_internal_text(flow->parser, flow->area, flow->line, slice, &text, &style);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+
+    node->kind      = ZOD_YAML_SCALAR;
+    node->as.scalar = (zod_yaml_node_scalar){
+        .text  = text,
+        .style = style,
+    };
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_sep(zod_yaml_internal_flow *flow) {
+    zod_yaml_internal_flow_skip(flow);
+    if (!zod_yaml_internal_flow_at(flow, ZOD_YAML_FLOW_SEP)) {
+        zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX, "expected ',' between items");
+        return ZOD_YAML_ERR_SYNTAX;
+    }
+
+    flow->pos++;
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_list(zod_yaml_internal_flow *flow, int depth,
+                                                   size_t count, zod_yaml_node *out) {
+    const zod_yaml_node **items = NULL;
+    zod_yaml_node        *nodes = NULL;
+
+    if (count > 0) {
+        items = zod_yaml_internal_area_alloc(flow->area, count * sizeof(*items), sizeof(void *));
+        nodes = zod_yaml_internal_area_alloc(flow->area, count * sizeof(*nodes), sizeof(void *));
+        if (items == NULL || nodes == NULL) {
+            zod_yaml_set_error(flow->parser->err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
+            return ZOD_YAML_ERR_NOMEM;
+        }
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        zod_yaml_status status = zod_yaml_internal_flow_item(flow, depth, &nodes[i]);
+        if (status != ZOD_YAML_OK) {
+            return status;
+        }
+        items[i] = &nodes[i];
+
+        if (i + 1 < count && (status = zod_yaml_internal_flow_sep(flow)) != ZOD_YAML_OK) {
+            return status;
+        }
+    }
+
+    out->kind          = ZOD_YAML_LIST;
+    out->line          = flow->line->number;
+    out->as.list.count = count;
+    out->as.list.items = items;
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_map(zod_yaml_internal_flow *flow, int depth,
+                                                  size_t count, zod_yaml_node *out) {
+    zod_yaml_node_entry *entries = NULL;
+    zod_yaml_node       *nodes   = NULL;
+
+    if (count > 0) {
+        entries =
+            zod_yaml_internal_area_alloc(flow->area, count * sizeof(*entries), sizeof(void *));
+        nodes = zod_yaml_internal_area_alloc(flow->area, count * sizeof(*nodes), sizeof(void *));
+        if (entries == NULL || nodes == NULL) {
+            zod_yaml_set_error(flow->parser->err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
+            return ZOD_YAML_ERR_NOMEM;
+        }
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        zod_yaml_internal_string_view key;
+        const char                   *key_text;
+
+        zod_yaml_status status = zod_yaml_internal_flow_scalar(flow, ZOD_YAML_FLOW_KEY, &key);
+        if (status != ZOD_YAML_OK) {
+            return status;
+        }
+        if (key.len == 0 || zod_yaml_internal_reserved(key)) {
+            zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX, "invalid flow map key");
+            return ZOD_YAML_ERR_SYNTAX;
+        }
+
+        status = zod_yaml_internal_text(flow->parser, flow->area, flow->line, key, &key_text, NULL);
+        if (status != ZOD_YAML_OK) {
+            return status;
+        }
+        if (zod_yaml_internal_has_key(entries, i, key_text)) {
+            zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_DUPLICATE_KEY, "duplicate key");
+            return ZOD_YAML_ERR_DUPLICATE_KEY;
+        }
+
+        zod_yaml_internal_flow_skip(flow);
+        if (!zod_yaml_internal_flow_at(flow, ZOD_YAML_KEY_SEP)) {
+            zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX, "expected ':' after key");
+            return ZOD_YAML_ERR_SYNTAX;
+        }
+        flow->pos++;
+
+        zod_yaml_node_entry entry = {
+            .key   = key_text,
+            .value = &nodes[i],
+        };
+        memcpy(&entries[i], &entry, sizeof(entry));
+
+        status = zod_yaml_internal_flow_item(flow, depth, &nodes[i]);
+        if (status != ZOD_YAML_OK) {
+            return status;
+        }
+
+        if (i + 1 < count && (status = zod_yaml_internal_flow_sep(flow)) != ZOD_YAML_OK) {
+            return status;
+        }
+    }
+
+    out->kind           = ZOD_YAML_MAP;
+    out->line           = flow->line->number;
+    out->as.map.count   = count;
+    out->as.map.entries = entries;
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_parse(zod_yaml_internal_flow *flow, int depth,
+                                                    zod_yaml_node *out) {
+    int    is_list = flow->raw.data[flow->pos] == ZOD_YAML_LIST_OPEN;
+    char   close   = is_list ? ZOD_YAML_LIST_CLOSE : ZOD_YAML_MAP_CLOSE;
+    size_t count;
+
+    if (depth > ZOD_YAML_MAX_DEPTH) {
+        zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_DEPTH, "nesting too deep");
+        return ZOD_YAML_ERR_DEPTH;
+    }
+
+    flow->pos++;
+
+    zod_yaml_status status = zod_yaml_internal_flow_count(flow, &count);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+    if (count > ZOD_YAML_MAX_ENTRIES) {
+        zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_TOO_LARGE, "too many entries in block");
+        return ZOD_YAML_ERR_TOO_LARGE;
+    }
+
+    status = is_list ? zod_yaml_internal_flow_list(flow, depth, count, out)
+                     : zod_yaml_internal_flow_map(flow, depth, count, out);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+
+    zod_yaml_internal_flow_skip(flow);
+    if (!zod_yaml_internal_flow_at(flow, close)) {
+        zod_yaml_internal_flow_error(flow, ZOD_YAML_ERR_SYNTAX, "expected closing bracket");
+        return ZOD_YAML_ERR_SYNTAX;
+    }
+
+    flow->pos++;
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_flow_value(zod_yaml_internal_parser     *parser,
+                                                    zod_yaml_internal_area       *area,
+                                                    const zod_yaml_internal_line *line,
+                                                    zod_yaml_internal_string_view raw, int depth,
+                                                    zod_yaml_node *node) {
+    zod_yaml_internal_flow flow = {
+        .parser = parser,
+        .area   = area,
+        .line   = line,
+        .raw    = raw,
+        .pos    = 0,
+    };
+
+    node->line             = line->number;
+
+    zod_yaml_status status = zod_yaml_internal_flow_parse(&flow, depth + 1, node);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+
+    zod_yaml_internal_flow_skip(&flow);
+    if (flow.pos != raw.len) {
+        zod_yaml_internal_flow_error(&flow, ZOD_YAML_ERR_SYNTAX, "text after flow collection");
+        return ZOD_YAML_ERR_SYNTAX;
+    }
+    return ZOD_YAML_OK;
+}
 
 static zod_yaml_status zod_yaml_internal_value(zod_yaml_internal_parser     *parser,
                                                zod_yaml_internal_area       *area,
@@ -468,11 +983,23 @@ static zod_yaml_status zod_yaml_internal_value(zod_yaml_internal_parser     *par
     node->line = line->number;
 
     if (value.len > 0) {
-        zod_yaml_scalar_style style = zod_yaml_internal_unquote(&value);
-        const char           *text  = zod_yaml_internal_area_copy(area, value);
-        if (text == NULL) {
-            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
-            return ZOD_YAML_ERR_NOMEM;
+        if (zod_yaml_internal_flow_start(value)) {
+            return zod_yaml_internal_flow_value(parser, area, line, value, depth, node);
+        }
+        if (zod_yaml_internal_reserved(value)) {
+            int column = line->indent + 1 + (int)(value.data - line->text.data);
+
+            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_UNSUPPORTED, line->number, column,
+                               ZOD_YAML_MSG_RESERVED);
+            return ZOD_YAML_ERR_UNSUPPORTED;
+        }
+
+        zod_yaml_scalar_style style;
+        const char           *text;
+
+        zod_yaml_status status = zod_yaml_internal_text(parser, area, line, value, &text, &style);
+        if (status != ZOD_YAML_OK) {
+            return status;
         }
 
         node->kind      = ZOD_YAML_SCALAR;
@@ -494,29 +1021,23 @@ static zod_yaml_status zod_yaml_internal_value(zod_yaml_internal_parser     *par
         return ZOD_YAML_ERR_UNSUPPORTED;
     }
 
-    return zod_yaml_internal_parse_map(parser, area, child.indent, depth + 1, node);
+    if (zod_yaml_internal_flow_start(child.text)) {
+        zod_yaml_internal_next_line(parser, &child);
+        return zod_yaml_internal_flow_value(parser, area, &child, child.text, depth, node);
+    }
+
+    return zod_yaml_internal_parse_block(parser, area, &child, depth + 1, node);
 }
 
 static zod_yaml_status zod_yaml_internal_parse_map(zod_yaml_internal_parser *parser,
                                                    zod_yaml_internal_area *area, int indent,
                                                    int depth, zod_yaml_node *out) {
     zod_yaml_internal_line line;
-    zod_yaml_status        status;
+    size_t                 count;
 
-    if (depth > ZOD_YAML_MAX_DEPTH) {
-        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_DEPTH, parser->line_number, 0,
-                           "nesting too deep");
-        return ZOD_YAML_ERR_DEPTH;
-    }
-
-    size_t count = zod_yaml_internal_count(*parser, indent, &status);
+    zod_yaml_status status = zod_yaml_internal_open(parser, indent, depth, &count);
     if (status != ZOD_YAML_OK) {
         return status;
-    }
-    if (count > ZOD_YAML_MAX_ENTRIES) {
-        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_TOO_LARGE, parser->line_number, 0,
-                           "too many entries in map");
-        return ZOD_YAML_ERR_TOO_LARGE;
     }
 
     zod_yaml_node_entry *entries =
@@ -531,14 +1052,18 @@ static zod_yaml_status zod_yaml_internal_parse_map(zod_yaml_internal_parser *par
     for (size_t i = 0; i < count; i++) {
         zod_yaml_internal_string_view key, value;
 
-        if (zod_yaml_internal_next_line(parser, &line) != ZOD_YAML_NEXT_LINE) {
-            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, parser->line_number, 0,
-                               "unexpected end of input");
-            return ZOD_YAML_ERR_SYNTAX;
+        status = zod_yaml_internal_next_entry(parser, indent, &line);
+        if (status != ZOD_YAML_OK) {
+            return status;
         }
-        if (line.indent != indent) {
+        if (zod_yaml_internal_flow_start(line.text) || zod_yaml_internal_reserved(line.text)) {
+            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_UNSUPPORTED, line.number, line.indent + 1,
+                               "key starts with a reserved character");
+            return ZOD_YAML_ERR_UNSUPPORTED;
+        }
+        if (zod_yaml_internal_is_item(line.text)) {
             zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, line.number, line.indent + 1,
-                               ZOD_YAML_MSG_INDENT);
+                               "list item inside a map");
             return ZOD_YAML_ERR_SYNTAX;
         }
         if (!zod_yaml_internal_split(line.text, &key, &value)) {
@@ -547,10 +1072,11 @@ static zod_yaml_status zod_yaml_internal_parse_map(zod_yaml_internal_parser *par
             return ZOD_YAML_ERR_SYNTAX;
         }
 
-        const char *key_text = zod_yaml_internal_area_copy(area, key);
-        if (key_text == NULL) {
-            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
-            return ZOD_YAML_ERR_NOMEM;
+        const char *key_text;
+
+        status = zod_yaml_internal_text(parser, area, &line, key, &key_text, NULL);
+        if (status != ZOD_YAML_OK) {
+            return status;
         }
         if (zod_yaml_internal_has_key(entries, i, key_text)) {
             zod_yaml_set_error(parser->err, ZOD_YAML_ERR_DUPLICATE_KEY, line.number,
@@ -575,6 +1101,99 @@ static zod_yaml_status zod_yaml_internal_parse_map(zod_yaml_internal_parser *par
     out->as.map.count   = count;
     out->as.map.entries = entries;
     return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_item(zod_yaml_internal_parser     *parser,
+                                              zod_yaml_internal_area       *area,
+                                              const zod_yaml_internal_line *line,
+                                              zod_yaml_internal_string_view item, int depth,
+                                              zod_yaml_node *node) {
+    zod_yaml_internal_string_view key, value;
+
+    if (item.len == 0) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_UNSUPPORTED, line->number, line->indent + 1,
+                           "empty items are not supported");
+        return ZOD_YAML_ERR_UNSUPPORTED;
+    }
+
+    if (zod_yaml_internal_is_item(item)) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_UNSUPPORTED, line->number, line->indent + 1,
+                           "nested lists are not supported");
+        return ZOD_YAML_ERR_UNSUPPORTED;
+    }
+
+    int is_entry = !zod_yaml_internal_flow_start(item) && !zod_yaml_internal_reserved(item) &&
+                   zod_yaml_internal_split(item, &key, &value);
+    if (!is_entry) {
+        return zod_yaml_internal_value(parser, area, line, item, depth, node);
+    }
+
+    int content_indent = line->indent + (int)(item.data - line->text.data);
+
+    parser->pending    = (zod_yaml_internal_line){
+        .indent = content_indent,
+        .text   = item,
+        .number = line->number,
+    };
+    parser->has_pending = 1;
+    return zod_yaml_internal_parse_map(parser, area, content_indent, depth + 1, node);
+}
+
+static zod_yaml_status zod_yaml_internal_parse_list(zod_yaml_internal_parser *parser,
+                                                    zod_yaml_internal_area *area, int indent,
+                                                    int depth, zod_yaml_node *out) {
+    zod_yaml_internal_line line;
+    size_t                 count;
+
+    zod_yaml_status status = zod_yaml_internal_open(parser, indent, depth, &count);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+
+    const zod_yaml_node **items =
+        zod_yaml_internal_area_alloc(area, count * sizeof(*items), sizeof(void *));
+    zod_yaml_node *nodes =
+        zod_yaml_internal_area_alloc(area, count * sizeof(*nodes), sizeof(void *));
+    if (items == NULL || nodes == NULL) {
+        zod_yaml_set_error(parser->err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
+        return ZOD_YAML_ERR_NOMEM;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        zod_yaml_internal_string_view item;
+
+        status = zod_yaml_internal_next_entry(parser, indent, &line);
+        if (status != ZOD_YAML_OK) {
+            return status;
+        }
+        if (!zod_yaml_internal_item_text(line.text, &item)) {
+            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, line.number, line.indent + 1,
+                               "expected '- item'");
+            return ZOD_YAML_ERR_SYNTAX;
+        }
+
+        status = zod_yaml_internal_item(parser, area, &line, item, depth, &nodes[i]);
+        if (status != ZOD_YAML_OK) {
+            return status;
+        }
+        items[i] = &nodes[i];
+    }
+
+    out->kind          = ZOD_YAML_LIST;
+    out->line          = nodes[0].line;
+    out->as.list.count = count;
+    out->as.list.items = items;
+    return ZOD_YAML_OK;
+}
+
+static zod_yaml_status zod_yaml_internal_parse_block(zod_yaml_internal_parser     *parser,
+                                                     zod_yaml_internal_area       *area,
+                                                     const zod_yaml_internal_line *first, int depth,
+                                                     zod_yaml_node *out) {
+    if (zod_yaml_internal_is_item(first->text)) {
+        return zod_yaml_internal_parse_list(parser, area, first->indent, depth, out);
+    }
+    return zod_yaml_internal_parse_map(parser, area, first->indent, depth, out);
 }
 
 static zod_yaml_status zod_yaml_internal_finish(zod_yaml_internal_parser *parser) {
@@ -624,8 +1243,7 @@ zod_yaml_status zod_yaml_parse(const char *text, size_t len, zod_yaml_doc **doc,
     new_doc->root.kind     = ZOD_YAML_NONE;
     zod_yaml_status status = ZOD_YAML_OK;
     if (first_next == ZOD_YAML_NEXT_LINE) {
-        status =
-            zod_yaml_internal_parse_map(&parser, &new_doc->area, first.indent, 1, &new_doc->root);
+        status = zod_yaml_internal_parse_block(&parser, &new_doc->area, &first, 1, &new_doc->root);
         if (status == ZOD_YAML_OK) {
             status = zod_yaml_internal_finish(&parser);
         }

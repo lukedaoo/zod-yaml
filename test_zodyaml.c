@@ -64,6 +64,7 @@ static void expect_parse_error(const char *text, zod_yaml_status want, int line)
     CHECK(doc == NULL);
     CHECK(err.status == want);
     CHECK(err.line == line);
+    zod_yaml_free(doc);
 }
 
 static void test_parse_errors(void) {
@@ -114,6 +115,429 @@ static void test_parse_nested_errors(void) {
     expect_parse_error("a:\n  b: 1\n  b: 2\n", ZOD_YAML_ERR_DUPLICATE_KEY, 3);
     expect_parse_error("a:\n  b:\nc: 1\n", ZOD_YAML_ERR_UNSUPPORTED, 2);
     expect_parse_error("a:\n  b: 1\n\tc: 2\n", ZOD_YAML_ERR_SYNTAX, 3);
+}
+
+static void test_parse_list_in_map(void) {
+    const char    *text = "a:\n  - x\n  - \"p: q\"   # c\n  - 3\nb: 1\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    const zod_yaml_node *list = zod_yaml_get(root, "a");
+
+    CHECK(zod_yaml_kind_of(list) == ZOD_YAML_LIST);
+    CHECK(zod_yaml_len(list) == 3);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(list, 0)), "x") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(list, 1)), "p: q") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(list, 2)), "3") == 0);
+    CHECK(zod_yaml_kind_of(zod_yaml_at(list, 3)) == ZOD_YAML_NONE);
+    CHECK(zod_yaml_kind_of(zod_yaml_get(list, "x")) == ZOD_YAML_NONE);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "b")), "1") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_root_list(void) {
+    const char    *text = "- a\n- b\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(zod_yaml_kind_of(root) == ZOD_YAML_LIST);
+    CHECK(zod_yaml_len(root) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(root, 1)), "b") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_map_items(void) {
+    const char *text =
+        "tags:\n"
+        "  - name: A\n"
+        "    description: d1\n"
+        "  - name: B\n"
+        "    description: d2\n"
+        "  - plain\n"
+        "  -   wide: 1\n"
+        "      more: 2\n"
+        "  - nest:\n"
+        "      deep: 3\n"
+        "    top: 4\n"
+        "after: 5\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    const zod_yaml_node *tags = zod_yaml_get(root, "tags");
+
+    CHECK(zod_yaml_kind_of(tags) == ZOD_YAML_LIST);
+    CHECK(zod_yaml_len(tags) == 5);
+    CHECK(zod_yaml_kind_of(zod_yaml_at(tags, 0)) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_len(zod_yaml_at(tags, 0)) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(tags, 0), "name")), "A") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(tags, 1), "description")), "d2") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(tags, 2)), "plain") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(tags, 3), "more")), "2") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(zod_yaml_at(tags, 4), "nest", "deep", NULL)), "3") ==
+          0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(tags, 4), "top")), "4") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "after")), "5") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_root_map_items(void) {
+    const char    *text = "- id: 1\n  k: v\n- id: 2\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(zod_yaml_kind_of(root) == ZOD_YAML_LIST);
+    CHECK(zod_yaml_len(root) == 2);
+    CHECK(zod_yaml_len(zod_yaml_at(root, 0)) == 2);
+    CHECK(zod_yaml_len(zod_yaml_at(root, 1)) == 1);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_item_nested_list(void) {
+    const char    *text = "- a:\n    - x\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *item = zod_yaml_at(zod_yaml_root(doc), 0);
+    const zod_yaml_node *list = zod_yaml_get(item, "a");
+
+    CHECK(zod_yaml_kind_of(item) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_kind_of(list) == ZOD_YAML_LIST);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(list, 0)), "x") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_quoted_keys(void) {
+    const char *text =
+        "\"201\": ok\n"
+        "\"a: b\": 1\n"
+        "plain: \"say \\\"hi\\\" \\\\ done\"\n"
+        "empty: \"\"\n"
+        "list:\n"
+        "  - \"k\": \"v\"\n"
+        "    j: 2\n"
+        "  - \"x: y\"\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    const zod_yaml_node *list = zod_yaml_get(root, "list");
+
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "201")), "ok") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "a: b")), "1") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "plain")), "say \"hi\" \\ done") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "empty")), "") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 0), "k")), "v") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 0), "j")), "2") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(list, 1)), "x: y") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_quote_errors(void) {
+    expect_parse_error("k: \"a\" and \"b\"\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("k: \"abc\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("k: \"abc\\\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("k: \"a\\nb\"\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("\"a: 1\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("\"a\": 1\na: 2\n", ZOD_YAML_ERR_DUPLICATE_KEY, 2);
+    expect_parse_error("x: 1\n\"b\" c: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
+}
+
+static void test_quote_error_column(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse("k: \"a\" b\n", 9, &doc, &err) == ZOD_YAML_ERR_SYNTAX);
+    CHECK(err.column == 7);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_flow_list(void) {
+    const char *text =
+        "a: [pAccess.Read, pMatch.Ready]\n"
+        "b: [No-Auth, Match Stats, \"x, y: z\"]\n"
+        "c: [https://app.example]\n"
+        "d: []\n"
+        "e: [ \"q\\\"r\" ]   # note\n"
+        "f: [[1, 2], [3]]\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    const zod_yaml_node *a    = zod_yaml_get(root, "a");
+    const zod_yaml_node *b    = zod_yaml_get(root, "b");
+
+    CHECK(zod_yaml_kind_of(a) == ZOD_YAML_LIST);
+    CHECK(zod_yaml_len(a) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(a, 0)), "pAccess.Read") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(a, 1)), "pMatch.Ready") == 0);
+    CHECK(zod_yaml_len(b) == 3);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(b, 1)), "Match Stats") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(b, 2)), "x, y: z") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_get(root, "c"), 0)), "https://app.example") ==
+          0);
+    CHECK(zod_yaml_kind_of(zod_yaml_get(root, "d")) == ZOD_YAML_LIST);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "d")) == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_get(root, "e"), 0)), "q\"r") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_at(zod_yaml_get(root, "f"), 0), 1)), "2") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_flow_map(void) {
+    const char *text =
+        "a: { key: ip, max: 10 }\n"
+        "b: {}\n"
+        "c: { description: Accepted. Email sent if the account exists. }\n"
+        "d: { $ref: \"#/components/x\" }   # c\n"
+        "e: [{ JwtAuth: [] }]\n"
+        "f: { in: { deep: [1, { k: v }] } }\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+
+    CHECK(zod_yaml_kind_of(zod_yaml_get(root, "a")) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "a")) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "a", "max", NULL)), "10") == 0);
+    CHECK(zod_yaml_kind_of(zod_yaml_get(root, "b")) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "b")) == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "c", "description", NULL)),
+                 "Accepted. Email sent if the account exists.") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "d", "$ref", NULL)), "#/components/x") == 0);
+
+    const zod_yaml_node *e0 = zod_yaml_at(zod_yaml_get(root, "e"), 0);
+    CHECK(zod_yaml_kind_of(zod_yaml_get(e0, "JwtAuth")) == ZOD_YAML_LIST);
+    CHECK(zod_yaml_len(zod_yaml_get(e0, "JwtAuth")) == 0);
+
+    const zod_yaml_node *deep = zod_yaml_path(root, "f", "in", "deep", NULL);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(zod_yaml_at(deep, 1), "k", NULL)), "v") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_flow_items(void) {
+    const char *text =
+        "list:\n"
+        "  - { $ref: \"#/x\" }\n"
+        "  - [a, b]\n"
+        "  - { code: \"forbidden\", status: 403, message: \"Missing, or no: access\" }\n"
+        "  - pRateLimit: { key: ip, window: 1h }   \n"
+        "    other: [1]\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *list = zod_yaml_get(zod_yaml_root(doc), "list");
+
+    CHECK(zod_yaml_len(list) == 4);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 0), "$ref")), "#/x") == 0);
+    CHECK(zod_yaml_kind_of(zod_yaml_at(list, 1)) == ZOD_YAML_LIST);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 2), "message")),
+                 "Missing, or no: access") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 2), "status")), "403") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(zod_yaml_at(list, 3), "pRateLimit", "window", NULL)),
+                 "1h") == 0);
+    CHECK(zod_yaml_len(zod_yaml_get(zod_yaml_at(list, 3), "other")) == 1);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_flow_errors(void) {
+    expect_parse_error("a: [x, y\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [x y] z\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [x,, y]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [x,]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [x}\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: {k: 1]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: {k}\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: {k: }\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: {k: 1, k: 2}\n", ZOD_YAML_ERR_DUPLICATE_KEY, 1);
+    expect_parse_error("a: [*x]\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: [x: y]\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: [\"x]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("b: 1\nc:\n  d: [x\n", ZOD_YAML_ERR_SYNTAX, 3);
+}
+
+static void test_parse_flow_key_lead(void) {
+    expect_parse_error("{ a: 1 }\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("[a, b]\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("x:\n  *a: 1\n", ZOD_YAML_ERR_UNSUPPORTED, 2);
+    expect_parse_error("x:\n  { a: 1 }: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("[a]: 1\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("*a: 1\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+}
+
+static void test_parse_flow_next_line(void) {
+    const char *text =
+        "reaches:\n"
+        "  [Auth, Users]\n"
+        "obj:\n"
+        "  { k: v }\n"
+        "list:\n"
+        "  - a:\n"
+        "      [x, y]\n"
+        "    b: 1\n"
+        "after: 2\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    const zod_yaml_node *item = zod_yaml_at(zod_yaml_get(root, "list"), 0);
+
+    CHECK(zod_yaml_kind_of(zod_yaml_get(root, "reaches")) == ZOD_YAML_LIST);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_get(root, "reaches"), 1)), "Users") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "obj", "k", NULL)), "v") == 0);
+    CHECK(zod_yaml_len(zod_yaml_get(item, "a")) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(item, "b")), "1") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "after")), "2") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_flow_next_line_errors(void) {
+    expect_parse_error("a:\n[x]\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a:\n  [x\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a:\n  [x] y\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a:\n  [x]\n  [y]\n", ZOD_YAML_ERR_SYNTAX, 3);
+    expect_parse_error("a:\n  [x]\n  b: 1\n", ZOD_YAML_ERR_SYNTAX, 3);
+}
+
+static void test_flow_next_line_column(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse("a:\n  [x y] z\n", 13, &doc, &err) == ZOD_YAML_ERR_SYNTAX);
+    CHECK(err.column == 9);
+    zod_yaml_free(doc);
+}
+
+static void test_flow_error_column(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse("a: [x y] z\n", 11, &doc, &err) == ZOD_YAML_ERR_SYNTAX);
+    CHECK(err.column == 10);
+    zod_yaml_free(doc);
+}
+
+static void expect_flow_depth(int levels, zod_yaml_status want) {
+    char   text[DEPTH_TEXT_CAP];
+    size_t len = (size_t)snprintf(text, sizeof(text), "k: ");
+
+    for (int i = 0; i < levels; i++) {
+        text[len++] = '[';
+    }
+    for (int i = 0; i < levels; i++) {
+        text[len++] = ']';
+    }
+    text[len++]        = '\n';
+
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, len, &doc, &err) == want);
+    zod_yaml_free(doc);
+}
+
+static void test_flow_depth_and_cap(void) {
+    expect_flow_depth(ZOD_YAML_MAX_DEPTH - 1, ZOD_YAML_OK);
+    expect_flow_depth(ZOD_YAML_MAX_DEPTH, ZOD_YAML_ERR_DEPTH);
+
+    for (size_t items = ZOD_YAML_MAX_ENTRIES; items <= ZOD_YAML_MAX_ENTRIES + 1; items++) {
+        char  *text = malloc(items * 2 + 8);
+        size_t len  = 0;
+
+        CHECK(text != NULL);
+        if (text == NULL) {
+            return;
+        }
+
+        len += (size_t)sprintf(text, "k: [");
+        for (size_t i = 0; i < items; i++) {
+            text[len++] = 'x';
+            text[len++] = i + 1 < items ? ',' : ']';
+        }
+        text[len++]         = '\n';
+
+        zod_yaml_doc   *doc = NULL;
+        zod_yaml_error  err;
+        zod_yaml_status want = items > ZOD_YAML_MAX_ENTRIES ? ZOD_YAML_ERR_TOO_LARGE : ZOD_YAML_OK;
+
+        CHECK(zod_yaml_parse(text, len, &doc, &err) == want);
+        zod_yaml_free(doc);
+        free(text);
+    }
+}
+
+static void test_parse_list_errors(void) {
+    expect_parse_error("- a\nb: 1\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a: 1\n- b\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("- a:\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("- a: 1\n b: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("- a: 1\n    b: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("- a: 1\n  a: 2\n", ZOD_YAML_ERR_DUPLICATE_KEY, 2);
+    expect_parse_error("- a: 1\n  - b\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("-\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("- - x\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("- a\n  - b\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a:\n- x\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+}
+
+static void test_parse_reserved_lead(void) {
+    expect_parse_error("a: !t [x, y]\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: &anc {k: v}\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: |\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: >\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: &x 1\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: *x\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: !!str 5\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("b: 1\nc:\n  d: !x\n", ZOD_YAML_ERR_UNSUPPORTED, 3);
+    expect_parse_error("- ok\n- *x\n", ZOD_YAML_ERR_UNSUPPORTED, 2);
+    expect_parse_error("- &a\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+}
+
+static void test_reserved_lead_column(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse("ab:   *x\n", 9, &doc, &err) == ZOD_YAML_ERR_UNSUPPORTED);
+    CHECK(err.column == 7);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_reserved_inside(void) {
+    const char    *text = "a: \"[x]\"\nb: x[1]\nc: b|c\nd: a&b\ne: \"{k: v}\"\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "a")), "[x]") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "b")), "x[1]") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "c")), "b|c") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "d")), "a&b") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "e")), "{k: v}") == 0);
+    zod_yaml_free(doc);
 }
 
 static void expect_depth(int levels, zod_yaml_status want) {
@@ -392,6 +816,28 @@ int main(void) {
     test_parse_sibling_maps();
     test_parse_nested_errors();
     test_parse_depth_limit();
+    test_parse_list_in_map();
+    test_parse_root_list();
+    test_parse_map_items();
+    test_parse_root_map_items();
+    test_parse_item_nested_list();
+    test_parse_flow_list();
+    test_parse_flow_map();
+    test_parse_flow_items();
+    test_parse_flow_errors();
+    test_parse_flow_key_lead();
+    test_flow_error_column();
+    test_parse_flow_next_line();
+    test_flow_next_line_errors();
+    test_flow_next_line_column();
+    test_flow_depth_and_cap();
+    test_parse_quoted_keys();
+    test_parse_quote_errors();
+    test_quote_error_column();
+    test_parse_list_errors();
+    test_parse_reserved_lead();
+    test_reserved_lead_column();
+    test_parse_reserved_inside();
     test_parse_empty();
     test_free_null();
 
