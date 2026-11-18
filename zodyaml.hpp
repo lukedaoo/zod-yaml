@@ -2,8 +2,10 @@
 #define ZOD_YAML_HPP
 
 #include <cstddef>
+#include <cstdio>
 #include <initializer_list>
 #include <stdexcept>
+#include <type_traits>
 
 #include "zodyaml.h"
 
@@ -41,6 +43,13 @@ public:
     }
 
     Node operator[](const char *key) const { return Node(zod_yaml_get(raw_, key)); }
+
+    template <typename Index,
+              typename = typename std::enable_if<std::is_integral<Index>::value>::type>
+    Node operator[](Index index) const {
+        return at(static_cast<std::size_t>(index));
+    }
+
     bool has(const char *key) const { return zod_yaml_has(raw_, key) == ZOD_YAML_FOUND; }
 
     Node path(std::initializer_list<const char *> keys) const {
@@ -52,15 +61,48 @@ public:
     }
 
     std::size_t size() const { return zod_yaml_len(raw_); }
-    Node        at(std::size_t index) const { return Node(zod_yaml_at(raw_, index)); }
 
-    const char *key_at(std::size_t index) const {
-        const char *key = zod_yaml_key_at(raw_, index);
-        return key == nullptr ? "" : key;
+    Node at(std::size_t index) const {
+        check(Kind::List, "at", index);
+        return Node(zod_yaml_at(raw_, index));
     }
 
-    Node value_at(std::size_t index) const { return Node(zod_yaml_val_at(raw_, index)); }
+    const char *key_at(std::size_t index) const {
+        check(Kind::Map, "key_at", index);
+        return zod_yaml_key_at(raw_, index);
+    }
+
+    Node value_at(std::size_t index) const {
+        check(Kind::Map, "value_at", index);
+        return Node(zod_yaml_val_at(raw_, index));
+    }
 private:
+    static const char *kind_name(Kind kind) {
+        switch (kind) {
+            case Kind::Map:
+                return "map";
+            case Kind::List:
+                return "list";
+            case Kind::Scalar:
+                return "scalar";
+            case Kind::None:
+                break;
+        }
+        return "none";
+    }
+
+    void check(Kind want, const char *call, std::size_t index) const {
+        if (kind() != want) {
+            std::fprintf(stderr, "zod-yaml: %s needs a %s, node is a %s\n", call, kind_name(want),
+                         kind_name(kind()));
+            return;
+        }
+        if (index >= size()) {
+            std::fprintf(stderr, "zod-yaml: %s index %zu out of range, size is %zu\n", call, index,
+                         size());
+        }
+    }
+
     const zod_yaml_node *raw_;
 };
 
