@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#define KEY_LINE_CAP   24
+#define DEPTH_TEXT_CAP 8192
+
 #define ZOD_YAML_IMPLEMENTATION
 #include "zodyaml.h"
 
@@ -67,8 +70,98 @@ static void test_parse_errors(void) {
     expect_parse_error("a: 1\nb\n", ZOD_YAML_ERR_SYNTAX, 2);
     expect_parse_error("a: 1\na: 2\n", ZOD_YAML_ERR_DUPLICATE_KEY, 2);
     expect_parse_error("a: 1\n  b: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
-    expect_parse_error("a:\n  b: 2\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a:\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a:\nb: 1\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
     expect_parse_error("a: 1\n\tb: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
+}
+
+static void test_parse_nested_map(void) {
+    const char    *text = "a:\n  b: 1\n  c:\n    d: 2\ne: 3\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(zod_yaml_len(root) == 2);
+    CHECK(zod_yaml_kind_of(zod_yaml_get(root, "a")) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "a")) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "a", "b", NULL)), "1") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "a", "c", "d", NULL)), "2") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "e")), "3") == 0);
+    CHECK(zod_yaml_kind_of(zod_yaml_path(root, "a", "x", NULL)) == ZOD_YAML_NONE);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_sibling_maps(void) {
+    const char    *text = "a:\n  x: 1\nb:\n  y: 2\n  z: 3\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "a")) == 1);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "b")) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "b", "z", NULL)), "3") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_nested_errors(void) {
+    expect_parse_error("a:\n    b: 1\n  c: 2\n", ZOD_YAML_ERR_SYNTAX, 3);
+    expect_parse_error("a:\n  b: 1\n   c: 2\n", ZOD_YAML_ERR_SYNTAX, 3);
+    expect_parse_error("  a: 1\nb: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a:\n  b: 1\n  b: 2\n", ZOD_YAML_ERR_DUPLICATE_KEY, 3);
+    expect_parse_error("a:\n  b:\nc: 1\n", ZOD_YAML_ERR_UNSUPPORTED, 2);
+    expect_parse_error("a:\n  b: 1\n\tc: 2\n", ZOD_YAML_ERR_SYNTAX, 3);
+}
+
+static void expect_depth(int levels, zod_yaml_status want) {
+    char   text[DEPTH_TEXT_CAP];
+    size_t len = 0;
+
+    for (int i = 0; i < levels; i++) {
+        len += (size_t)snprintf(text + len, sizeof(text) - len, "%*sk:\n", i, "");
+    }
+    len += (size_t)snprintf(text + len, sizeof(text) - len, "%*sv: 1\n", levels, "");
+
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, len, &doc, &err) == want);
+    CHECK((doc != NULL) == (want == ZOD_YAML_OK));
+    zod_yaml_free(doc);
+}
+
+static void test_parse_depth_limit(void) {
+    expect_depth(ZOD_YAML_MAX_DEPTH - 1, ZOD_YAML_OK);
+    expect_depth(ZOD_YAML_MAX_DEPTH, ZOD_YAML_ERR_DEPTH);
+}
+
+static void expect_key_count(size_t count, zod_yaml_status want) {
+    char *text = malloc(count * KEY_LINE_CAP + 1);
+    CHECK(text != NULL);
+    if (text == NULL) {
+        return;
+    }
+
+    size_t len = 0;
+    for (size_t i = 0; i < count; i++) {
+        len += (size_t)snprintf(text + len, KEY_LINE_CAP, "k%zu: 1\n", i);
+    }
+
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, len, &doc, &err) == want);
+    CHECK((doc != NULL) == (want == ZOD_YAML_OK));
+    zod_yaml_free(doc);
+    free(text);
+}
+
+static void test_parse_entry_cap(void) {
+    expect_key_count(ZOD_YAML_MAX_ENTRIES, ZOD_YAML_OK);
+    expect_key_count(ZOD_YAML_MAX_ENTRIES + 1, ZOD_YAML_ERR_TOO_LARGE);
 }
 
 static void test_parse_empty(void) {
@@ -294,6 +387,11 @@ int main(void) {
     test_parse_flat_map();
     test_parse_flat_map_many();
     test_parse_errors();
+    test_parse_entry_cap();
+    test_parse_nested_map();
+    test_parse_sibling_maps();
+    test_parse_nested_errors();
+    test_parse_depth_limit();
     test_parse_empty();
     test_free_null();
 
