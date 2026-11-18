@@ -1048,6 +1048,223 @@ static void test_scan_rejects_doc_marker(void) {
     expect_error("a: 1\n---\n", 2);
 }
 
+static void test_flow_closer_dedent(void) {
+    const char *text = "outer:\n"
+                       "  inner: [\n"
+                       "    z,\n"
+                       "]\n"
+                       "last: 1\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+
+    CHECK(zod_yaml_len(root) == 2);
+    CHECK(zod_yaml_len(zod_yaml_path(root, "outer", "inner", NULL)) == 1);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "last")), "1") == 0);
+    zod_yaml_free(doc);
+}
+
+static const char *const SKIP_KEYS[] = { "description", "summary" };
+
+static zod_yaml_status parse_skip(const char *text, zod_yaml_doc **doc, zod_yaml_error *err) {
+    zod_yaml_options options = { SKIP_KEYS, sizeof SKIP_KEYS / sizeof SKIP_KEYS[0] };
+
+    return zod_yaml_parse_opts(text, strlen(text), doc, err, &options);
+}
+
+static void expect_skip_error(const char *text, zod_yaml_status want, int line) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(parse_skip(text, &doc, &err) == want);
+    CHECK(doc == NULL);
+    CHECK(err.line == line);
+    zod_yaml_free(doc);
+}
+
+static void test_skip_keys(void) {
+    const char *text = "id: 1\n"
+                       "description: plain text\n"
+                       "summary: \"quoted: text\"\n"
+                       "\"description\": quoted key\n"
+                       "info:\n"
+                       "  description:\n"
+                       "    deep: map\n"
+                       "    list:\n"
+                       "      - a\n"
+                       "      - b\n"
+                       "  name: kept\n"
+                       "flow:\n"
+                       "  description: [\n"
+                       "    a,\n"
+                       "    b,\n"
+                       "  ]\n"
+                       "  summary: { k: v,\n"
+                       "  }\n"
+                       "  keep: 1\n"
+                       "items:\n"
+                       "  - description: first skipped\n"
+                       "    id: 1\n"
+                       "  - id: 2\n"
+                       "    description: last skipped\n"
+                       "  - description: only\n"
+                       "  - id: 3\n"
+                       "end: 2\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(parse_skip(text, &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root  = zod_yaml_root(doc);
+    const zod_yaml_node *items = zod_yaml_get(root, "items");
+
+    CHECK(zod_yaml_len(root) == 5);
+    CHECK(zod_yaml_has(root, "description") == ZOD_YAML_MISSING);
+    CHECK(zod_yaml_has(root, "summary") == ZOD_YAML_MISSING);
+    CHECK(strcmp(zod_yaml_key_at(root, 1), "info") == 0);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "info")) == 1);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "info", "name", NULL)), "kept") == 0);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "flow")) == 1);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "flow", "keep", NULL)), "1") == 0);
+    CHECK(zod_yaml_len(items) == 4);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(items, 0), "id")), "1") == 0);
+    CHECK(zod_yaml_len(zod_yaml_at(items, 0)) == 1);
+    CHECK(zod_yaml_len(zod_yaml_at(items, 1)) == 1);
+    CHECK(zod_yaml_len(zod_yaml_at(items, 2)) == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(items, 3), "id")), "3") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "end")), "2") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_skip_unsupported_values(void) {
+    const char *text = "a: 1\n"
+                       "description: |\n"
+                       "  free text\n"
+                       "  see: [ not a flow\n"
+                       "  more # comment\n"
+                       "\n"
+                       "  after blank\n"
+                       "summary: >\n"
+                       "  folded\n"
+                       "description: *alias\n"
+                       "b: 2\n"
+                       "summary: &anchor value\n"
+                       "summary: !!str 5\n"
+                       "summary: \"unterminated\n"
+                       "description:\n"
+                       "c: 3\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(parse_skip(text, &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+
+    CHECK(zod_yaml_len(root) == 3);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "a")), "1") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "b")), "2") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "c")), "3") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_skip_flow_keys(void) {
+    const char *text = "a: { description: x, k: v }\n"
+                       "b: { description: x }\n"
+                       "c: {\n"
+                       "  summary: s,\n"
+                       "  k: v,\n"
+                       "  description: [1, { description: n }],\n"
+                       "}\n"
+                       "d: [{ description: x, id: 1 }, { id: 2, summary: y }]\n"
+                       "e:\n"
+                       "  { description: x, k: v }\n"
+                       "\"201\": { description: Created }\n"
+                       "f: { k: v, description: x }\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(parse_skip(text, &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    const zod_yaml_node *d    = zod_yaml_get(root, "d");
+
+    CHECK(zod_yaml_len(zod_yaml_get(root, "a")) == 1);
+    CHECK(strcmp(zod_yaml_key_at(zod_yaml_get(root, "a"), 0), "k") == 0);
+    CHECK(zod_yaml_kind_of(zod_yaml_get(root, "b")) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "b")) == 0);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "c")) == 1);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "c", "k", NULL)), "v") == 0);
+    CHECK(zod_yaml_len(d) == 2);
+    CHECK(zod_yaml_len(zod_yaml_at(d, 0)) == 1);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(d, 0), "id")), "1") == 0);
+    CHECK(zod_yaml_len(zod_yaml_at(d, 1)) == 1);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "e")) == 1);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "201")) == 0);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "f")) == 1);
+    zod_yaml_free(doc);
+
+    expect_skip_error("a: { description: *x, k: v }\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_skip_error("a: { k: 1, k: 2, description: x }\n", ZOD_YAML_ERR_DUPLICATE_KEY, 1);
+    expect_skip_error("a: {\n  description: x,\n  k: 1,\n  k: 2,\n}\n", ZOD_YAML_ERR_DUPLICATE_KEY, 4);
+}
+
+static void test_skip_all_keys(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(parse_skip("description: a\nsummary: b\n", &doc, &err) == ZOD_YAML_OK);
+    CHECK(zod_yaml_kind_of(zod_yaml_root(doc)) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_len(zod_yaml_root(doc)) == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_skip_off(void) {
+    const char *text = "description: kept\nid: 1\n";
+    zod_yaml_options none_listed = { NULL, 0 };
+    zod_yaml_options empty_list  = { SKIP_KEYS, 0 };
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse_opts(text, strlen(text), &doc, &err, NULL) == ZOD_YAML_OK);
+    CHECK(zod_yaml_len(zod_yaml_root(doc)) == 2);
+    zod_yaml_free(doc);
+
+    CHECK(zod_yaml_parse_opts(text, strlen(text), &doc, &err, &none_listed) == ZOD_YAML_OK);
+    CHECK(zod_yaml_len(zod_yaml_root(doc)) == 2);
+    zod_yaml_free(doc);
+
+    CHECK(zod_yaml_parse_opts(text, strlen(text), &doc, &err, &empty_list) == ZOD_YAML_OK);
+    CHECK(zod_yaml_len(zod_yaml_root(doc)) == 2);
+    zod_yaml_free(doc);
+}
+
+static void test_skip_errors(void) {
+    expect_skip_error("description: |\n  x\nbad line\n", ZOD_YAML_ERR_SYNTAX, 3);
+    expect_skip_error("a: 1\nsummary: x\nb: [\n", ZOD_YAML_ERR_SYNTAX, 3);
+    expect_skip_error("description: [\n  a,\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_skip_error("title: |\n  x\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_skip_error("a: 1\na: 2\ndescription: x\n", ZOD_YAML_ERR_DUPLICATE_KEY, 2);
+    expect_skip_error("description: x\n\tb: 1\n", ZOD_YAML_ERR_SYNTAX, 2);
+}
+
+static void test_skip_load(void) {
+    const char *text = "description: |\n  x\nid: 1\n";
+    zod_yaml_options options = { SKIP_KEYS, 2 };
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    write_file(text, strlen(text));
+
+    CHECK(zod_yaml_load(LOAD_TEST_PATH, &doc, &err) == ZOD_YAML_ERR_UNSUPPORTED);
+    CHECK(zod_yaml_load_opts(LOAD_TEST_PATH, &doc, &err, &options) == ZOD_YAML_OK);
+    CHECK(zod_yaml_len(zod_yaml_root(doc)) == 1);
+    zod_yaml_free(doc);
+    remove(LOAD_TEST_PATH);
+}
+
 int main(void) {
     test_set_error_sets_position();
     test_scan_empty_input();
@@ -1108,6 +1325,14 @@ int main(void) {
     test_load_size_limit();
     test_parse_empty();
     test_free_null();
+    test_flow_closer_dedent();
+    test_skip_keys();
+    test_skip_unsupported_values();
+    test_skip_flow_keys();
+    test_skip_all_keys();
+    test_skip_off();
+    test_skip_errors();
+    test_skip_load();
 
     printf("%d checks, %d failed\n", checks_run, checks_failed);
     return checks_failed == 0 ? 0 : 1;

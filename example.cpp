@@ -52,40 +52,43 @@ static void print_route_policies(const zod::yaml::Node &paths) {
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "test.yaml";
 
-    try {
-        zod::yaml::Document doc  = zod::yaml::Document::load(path);
-        zod::yaml::Node     root = doc.root();
+    zod::yaml::Document doc = zod::yaml::Document::load(path, { "description", "summary" });
+    if (!doc) {
+        return static_cast<int>(doc.error().status);
+    }
 
-        std::printf("title: %s\n", root.path({ "info", "title" }).as_str());
+    zod::yaml::Node root = doc.root();
 
-        zod::yaml::Node tags = root["x-groups"][0]["tags"];
-        std::printf("public tags:");
-        for (std::size_t i = 0; i < tags.size(); i++) {
-            std::printf(" %s", tags[i].as_str());
-        }
-        std::printf("\n");
+    std::printf("title: %s\n", root.path({ "info", "title" }).as_str());
 
-        zod::yaml::Node defs = root["x-policy-defs"];
-        for (std::size_t i = 0; i < defs.size(); i++) {
-            const char *name = defs.key_at(i);
+    zod::yaml::Node tags = root["x-groups"][0]["tags"];
+    std::printf("public tags:");
+    for (std::size_t i = 0; i < tags.size(); i++) {
+        std::printf(" %s", tags[i].as_str());
+    }
+    std::printf("\n");
 
-            std::printf("policy %s: %s\n", name, defs[name]["kind"].as_str());
-        }
+    zod::yaml::Node defs = root["x-policy-defs"];
+    for (std::size_t i = 0; i < defs.size(); i++) {
+        const char *name = defs.key_at(i);
 
-        zod::yaml::Node errors = root["x-errors"];
-        for (std::size_t i = 0; i < errors.size(); i++) {
-            std::printf("error %s %s: %s\n", errors[i]["status"].as_str(),
-                        errors[i]["code"].as_str(), errors[i]["message"].as_str());
-        }
+        std::printf("policy %s: %s\n", name, defs[name]["kind"].as_str());
+    }
 
-        print_route_policies(root["paths"]);
+    zod::yaml::Node errors = root["x-errors"];
+    for (std::size_t i = 0; i < errors.size(); i++) {
+        std::printf("error %s %s: %s\n", errors[i]["status"].as_str(),
+                    errors[i]["code"].as_str(), errors[i]["message"].as_str());
+    }
 
-        if (!root.has("missing")) {
-            std::printf("no 'missing' key\n");
-        }
-    } catch (const zod::yaml::Error &error) {
-        std::fprintf(stderr, "%s:%d:%d: %s\n", path, error.line(), error.column(), error.what());
-        return 1;
+    print_route_policies(root["paths"]);
+
+    if (!root["tags"][0].has("description")) {
+        std::printf("descriptions skipped\n");
+    }
+
+    if (!root.has("missing")) {
+        std::printf("no 'missing' key\n");
     }
     return 0;
 }

@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdio>
 #include <initializer_list>
-#include <stdexcept>
 #include <type_traits>
 
 #include "zodyaml.h"
@@ -13,23 +12,6 @@ namespace zod {
 namespace yaml {
 
 enum class Kind { None, Map, List, Scalar };
-
-class Error : public std::runtime_error {
-public:
-    Error(const zod_yaml_error &raw)
-        : std::runtime_error(raw.message),
-          status_(raw.status),
-          line_(raw.line),
-          column_(raw.column) {}
-
-    zod_yaml_status status() const { return status_; }
-    int             line() const { return line_; }
-    int             column() const { return column_; }
-private:
-    zod_yaml_status status_;
-    int             line_;
-    int             column_;
-};
 
 class Node {
 public:
@@ -108,30 +90,37 @@ private:
 
 class Document {
 public:
-    static Document parse(const char *text, std::size_t len) {
-        zod_yaml_doc  *raw = nullptr;
-        zod_yaml_error err;
-        if (zod_yaml_parse(text, len, &raw, &err) != ZOD_YAML_OK) {
-            throw Error(err);
+    static Document parse(const char *text, std::size_t len,
+                          std::initializer_list<const char *> skip_keys = {}) {
+        zod_yaml_doc          *raw = nullptr;
+        zod_yaml_error         err = {};
+        const zod_yaml_options options = { skip_keys.begin(), skip_keys.size() };
+        if (zod_yaml_parse_opts(text, len, &raw, &err, &options) != ZOD_YAML_OK) {
+            std::fprintf(stderr, "zod-yaml: %d:%d: %s\n", err.line, err.column, err.message);
         }
-        return Document(raw);
+        return Document(raw, err);
     }
 
-    static Document load(const char *path) {
-        zod_yaml_doc  *raw = nullptr;
-        zod_yaml_error err;
-        if (zod_yaml_load(path, &raw, &err) != ZOD_YAML_OK) {
-            throw Error(err);
+    static Document load(const char *path, std::initializer_list<const char *> skip_keys = {}) {
+        zod_yaml_doc          *raw = nullptr;
+        zod_yaml_error         err = {};
+        const zod_yaml_options options = { skip_keys.begin(), skip_keys.size() };
+        if (zod_yaml_load_opts(path, &raw, &err, &options) != ZOD_YAML_OK) {
+            std::fprintf(stderr, "zod-yaml: %s:%d:%d: %s\n", path, err.line, err.column,
+                         err.message);
         }
-        return Document(raw);
+        return Document(raw, err);
     }
 
-    Document(Document &&other) noexcept : raw_(other.raw_) { other.raw_ = nullptr; }
+    Document(Document &&other) noexcept : raw_(other.raw_), err_(other.err_) {
+        other.raw_ = nullptr;
+    }
 
     Document &operator=(Document &&other) noexcept {
         if (this != &other) {
             zod_yaml_free(raw_);
             raw_       = other.raw_;
+            err_       = other.err_;
             other.raw_ = nullptr;
         }
         return *this;
@@ -142,11 +131,17 @@ public:
 
     ~Document() { zod_yaml_free(raw_); }
 
+    explicit operator bool() const { return raw_ != nullptr; }
+
+    /* status is ZOD_YAML_OK when the document loaded. */
+    const zod_yaml_error &error() const { return err_; }
+
     Node root() const { return Node(zod_yaml_root(raw_)); }
 private:
-    explicit Document(zod_yaml_doc *raw) : raw_(raw) {}
+    Document(zod_yaml_doc *raw, const zod_yaml_error &err) : raw_(raw), err_(err) {}
 
-    zod_yaml_doc *raw_;
+    zod_yaml_doc  *raw_;
+    zod_yaml_error err_;
 };
 
 }

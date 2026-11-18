@@ -65,11 +65,14 @@ static void print_route_policies(const zod_yaml_node *paths) {
 }
 
 int main(int argc, char **argv) {
-    const char    *path = argc > 1 ? argv[1] : "test.yaml";
-    zod_yaml_doc  *doc  = NULL;
-    zod_yaml_error err;
+    static const char *const skip[] = { "description", "summary" };
 
-    if (zod_yaml_load(path, &doc, &err) != ZOD_YAML_OK) {
+    const char      *path    = argc > 1 ? argv[1] : "test.yaml";
+    zod_yaml_options options = { skip, sizeof skip / sizeof skip[0] };
+    zod_yaml_doc    *doc     = NULL;
+    zod_yaml_error   err;
+
+    if (zod_yaml_load_opts(path, &doc, &err, &options) != ZOD_YAML_OK) {
         fprintf(stderr, "%s:%d:%d: %s\n", path, err.line, err.column, err.message);
         return 1;
     }
@@ -96,6 +99,10 @@ int main(int argc, char **argv) {
     }
 
     print_route_policies(zod_yaml_get(root, "paths"));
+
+    if (zod_yaml_has(zod_yaml_at(zod_yaml_get(root, "tags"), 0), "description") == ZOD_YAML_MISSING) {
+        printf("descriptions skipped\n");
+    }
 
     if (zod_yaml_has(root, "missing") == ZOD_YAML_MISSING) {
         printf("no 'missing' key\n");
