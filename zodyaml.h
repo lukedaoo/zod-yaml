@@ -1,6 +1,7 @@
 #ifndef ZOD_YAML_H
 #define ZOD_YAML_H
 
+// Author: LD - Nov, 2026
 /* zod-yaml: dependency-free YAML subset reader. C99, usable from C++11.
  *
  * NOT a full YAML parser. Unsupported syntax is rejected, never guessed.
