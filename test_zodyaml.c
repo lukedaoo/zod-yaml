@@ -24,7 +24,51 @@ static void test_parse_flat_map(void) {
     zod_yaml_status status = zod_yaml_parse(text, strlen(text), &doc, &err);
 
     CHECK(status == ZOD_YAML_OK);
+    CHECK(doc != NULL);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(zod_yaml_kind_of(root) == ZOD_YAML_MAP);
+    CHECK(zod_yaml_len(root) == 1);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "a")), "1") == 0);
+    CHECK(zod_yaml_has(root, "a") == ZOD_YAML_FOUND);
+    CHECK(zod_yaml_has(root, "b") == ZOD_YAML_MISSING);
+    CHECK(zod_yaml_kind_of(zod_yaml_get(root, "b")) == ZOD_YAML_NONE);
+    CHECK(strcmp(zod_yaml_key_at(root, 0), "a") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_val_at(root, 0)), "1") == 0);
     zod_yaml_free(doc);
+}
+
+static void test_parse_flat_map_many(void) {
+    const char    *text = "name: zod\n# c\n\nver:   2 # x\nq: \"a: b\"\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(zod_yaml_len(root) == 3);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "name")), "zod") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "ver")), "2") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "q")), "a: b") == 0);
+    zod_yaml_free(doc);
+}
+
+static void expect_parse_error(const char *text, zod_yaml_status want, int line) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == want);
+    CHECK(doc == NULL);
+    CHECK(err.status == want);
+    CHECK(err.line == line);
+}
+
+static void test_parse_errors(void) {
+    expect_parse_error("a: 1\nb\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a: 1\na: 2\n", ZOD_YAML_ERR_DUPLICATE_KEY, 2);
+    expect_parse_error("a: 1\n  b: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a:\n  b: 2\n", ZOD_YAML_ERR_UNSUPPORTED, 1);
+    expect_parse_error("a: 1\n\tb: 2\n", ZOD_YAML_ERR_SYNTAX, 2);
 }
 
 static void test_parse_empty(void) {
@@ -248,6 +292,8 @@ int main(void) {
     test_area_fills_blocks();
     test_area_copy_empty();
     test_parse_flat_map();
+    test_parse_flat_map_many();
+    test_parse_errors();
     test_parse_empty();
     test_free_null();
 

@@ -118,6 +118,8 @@ const zod_yaml_node *zod_yaml_val_at(const zod_yaml_node *map, size_t index);
 #include <string.h>
 
 #define ZOD_YAML_AREA_BLOCK_CAP 4096
+#define ZOD_YAML_KEY_SEP        ':'
+#define ZOD_YAML_MSG_NOMEM      "out of memory"
 #define ZOD_YAML_DOC_MARKER     "---"
 #define ZOD_YAML_DOC_MARKER_LEN (sizeof(ZOD_YAML_DOC_MARKER) - 1)
 
@@ -382,6 +384,142 @@ static zod_yaml_internal_next zod_yaml_internal_next_line(zod_yaml_internal_pars
     return ZOD_YAML_NEXT_END;
 }
 
+static int zod_yaml_internal_split(zod_yaml_internal_string_view  text,
+                                   zod_yaml_internal_string_view *key,
+                                   zod_yaml_internal_string_view *value) {
+    for (size_t i = 0; i < text.len; i++) {
+        int ends_key =
+            text.data[i] == ZOD_YAML_KEY_SEP && (i + 1 == text.len || text.data[i + 1] == ' ');
+        if (!ends_key) {
+            continue;
+        }
+
+        size_t key_len = i;
+        while (key_len > 0 && text.data[key_len - 1] == ' ') {
+            key_len--;
+        }
+
+        size_t value_pos = i + 1;
+        while (value_pos < text.len && text.data[value_pos] == ' ') {
+            value_pos++;
+        }
+
+        *key   = zod_yaml_internal_sv(text.data, key_len);
+        *value = zod_yaml_internal_sv(text.data + value_pos, text.len - value_pos);
+        return key_len > 0;
+    }
+    return 0;
+}
+
+static zod_yaml_scalar_style zod_yaml_internal_unquote(zod_yaml_internal_string_view *value) {
+    int quoted = value->len >= 2 && value->data[0] == '"' && value->data[value->len - 1] == '"';
+    if (!quoted) {
+        return ZOD_YAML_PLAIN;
+    }
+
+    *value = zod_yaml_internal_sv(value->data + 1, value->len - 2);
+    return ZOD_YAML_QUOTED;
+}
+
+static size_t zod_yaml_internal_count(const char *text, size_t len, zod_yaml_error *err,
+                                      zod_yaml_status *status) {
+    zod_yaml_internal_parser parser;
+    zod_yaml_internal_line   line;
+    size_t                   count = 0;
+
+    zod_yaml_internal_next next;
+
+    zod_yaml_internal_parser_init(&parser, text, len, err);
+    while ((next = zod_yaml_internal_next_line(&parser, &line)) == ZOD_YAML_NEXT_LINE) {
+        count++;
+    }
+
+    *status = next == ZOD_YAML_NEXT_ERROR ? ZOD_YAML_ERR_SYNTAX : ZOD_YAML_OK;
+    return count;
+}
+
+static int zod_yaml_internal_has_key(const zod_yaml_node_entry *entries, size_t count,
+                                     const char *key) {
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(entries[i].key, key) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static zod_yaml_status zod_yaml_internal_flat_map(zod_yaml_doc *doc, const char *text, size_t len,
+                                                  size_t count, zod_yaml_error *err) {
+    zod_yaml_internal_parser parser;
+    zod_yaml_internal_line   line;
+    zod_yaml_node_entry     *entries;
+    zod_yaml_node           *nodes;
+    int                      first_indent = 0;
+
+    entries = zod_yaml_internal_area_alloc(&doc->area, count * sizeof(*entries), sizeof(void *));
+    nodes   = zod_yaml_internal_area_alloc(&doc->area, count * sizeof(*nodes), sizeof(void *));
+    if (entries == NULL || nodes == NULL) {
+        zod_yaml_set_error(err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
+        return ZOD_YAML_ERR_NOMEM;
+    }
+
+    zod_yaml_internal_parser_init(&parser, text, len, err);
+    for (size_t i = 0; i < count; i++) {
+        zod_yaml_internal_string_view key, value;
+
+        zod_yaml_internal_next_line(&parser, &line);
+        first_indent = i == 0 ? line.indent : first_indent;
+
+        if (line.indent != first_indent) {
+            zod_yaml_set_error(err, ZOD_YAML_ERR_SYNTAX, line.number, line.indent + 1,
+                               "unexpected indentation");
+            return ZOD_YAML_ERR_SYNTAX;
+        }
+        if (!zod_yaml_internal_split(line.text, &key, &value)) {
+            zod_yaml_set_error(err, ZOD_YAML_ERR_SYNTAX, line.number, line.indent + 1,
+                               "expected 'key: value'");
+            return ZOD_YAML_ERR_SYNTAX;
+        }
+        if (value.len == 0) {
+            zod_yaml_set_error(err, ZOD_YAML_ERR_UNSUPPORTED, line.number, line.indent + 1,
+                               "nested values are not supported");
+            return ZOD_YAML_ERR_UNSUPPORTED;
+        }
+
+        zod_yaml_scalar_style style    = zod_yaml_internal_unquote(&value);
+        const char           *key_text = zod_yaml_internal_area_copy(&doc->area, key);
+        const char           *val_text = zod_yaml_internal_area_copy(&doc->area, value);
+        if (key_text == NULL || val_text == NULL) {
+            zod_yaml_set_error(err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
+            return ZOD_YAML_ERR_NOMEM;
+        }
+        if (zod_yaml_internal_has_key(entries, i, key_text)) {
+            zod_yaml_set_error(err, ZOD_YAML_ERR_DUPLICATE_KEY, line.number, line.indent + 1,
+                               "duplicate key");
+            return ZOD_YAML_ERR_DUPLICATE_KEY;
+        }
+
+        nodes[i].kind      = ZOD_YAML_SCALAR;
+        nodes[i].line      = line.number;
+        nodes[i].as.scalar = (zod_yaml_node_scalar){
+            .text  = val_text,
+            .style = style,
+        };
+
+        zod_yaml_node_entry entry = {
+            .key   = key_text,
+            .value = &nodes[i],
+        };
+        memcpy(&entries[i], &entry, sizeof(entry));
+    }
+
+    doc->root.kind           = ZOD_YAML_MAP;
+    doc->root.line           = nodes[0].line;
+    doc->root.as.map.count   = count;
+    doc->root.as.map.entries = entries;
+    return ZOD_YAML_OK;
+}
+
 zod_yaml_status zod_yaml_parse(const char *text, size_t len, zod_yaml_doc **doc,
                                zod_yaml_error *err) {
     *doc = NULL;
@@ -396,15 +534,28 @@ zod_yaml_status zod_yaml_parse(const char *text, size_t len, zod_yaml_doc **doc,
         return ZOD_YAML_ERR_SYNTAX;
     }
 
+    zod_yaml_status status;
+    size_t          count = zod_yaml_internal_count(text, len, err, &status);
+    if (status != ZOD_YAML_OK) {
+        return status;
+    }
+
     zod_yaml_doc *new_doc = calloc(1, sizeof(*new_doc));
     if (new_doc == NULL) {
-        zod_yaml_set_error(err, ZOD_YAML_ERR_NOMEM, 0, 0, "out of memory");
+        zod_yaml_set_error(err, ZOD_YAML_ERR_NOMEM, 0, 0, ZOD_YAML_MSG_NOMEM);
         return ZOD_YAML_ERR_NOMEM;
     }
 
     new_doc->root.kind = ZOD_YAML_NONE;
-    *doc               = new_doc;
+    if (count > 0) {
+        status = zod_yaml_internal_flat_map(new_doc, text, len, count, err);
+    }
+    if (status != ZOD_YAML_OK) {
+        zod_yaml_free(new_doc);
+        return status;
+    }
 
+    *doc = new_doc;
     return ZOD_YAML_OK;
 }
 
@@ -431,20 +582,30 @@ const zod_yaml_node *zod_yaml_root(const zod_yaml_doc *doc) {
 zod_yaml_kind zod_yaml_kind_of(const zod_yaml_node *node) { return node->kind; }
 
 const char *zod_yaml_str(const zod_yaml_node *node) {
-    (void)node;
+    return node->kind == ZOD_YAML_SCALAR ? node->as.scalar.text : NULL;
+}
+
+static const zod_yaml_node *zod_yaml_internal_find(const zod_yaml_node *map, const char *key) {
+    if (map->kind != ZOD_YAML_MAP) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < map->as.map.count; i++) {
+        if (strcmp(map->as.map.entries[i].key, key) == 0) {
+            return map->as.map.entries[i].value;
+        }
+    }
     return NULL;
 }
 
 const zod_yaml_node *zod_yaml_get(const zod_yaml_node *map, const char *key) {
-    (void)map;
-    (void)key;
-    return &zod_yaml_none;
+    const zod_yaml_node *found = zod_yaml_internal_find(map, key);
+
+    return found != NULL ? found : &zod_yaml_none;
 }
 
 zod_yaml_presence zod_yaml_has(const zod_yaml_node *map, const char *key) {
-    (void)map;
-    (void)key;
-    return ZOD_YAML_MISSING;
+    return zod_yaml_internal_find(map, key) != NULL ? ZOD_YAML_FOUND : ZOD_YAML_MISSING;
 }
 
 const zod_yaml_node *zod_yaml_path(const zod_yaml_node *from, ...) {
@@ -462,26 +623,31 @@ const zod_yaml_node *zod_yaml_path(const zod_yaml_node *from, ...) {
 }
 
 size_t zod_yaml_len(const zod_yaml_node *node) {
-    (void)node;
-    return 0;
+    if (node->kind == ZOD_YAML_MAP) {
+        return node->as.map.count;
+    }
+    return node->kind == ZOD_YAML_LIST ? node->as.list.count : 0;
 }
 
 const zod_yaml_node *zod_yaml_at(const zod_yaml_node *list, size_t index) {
-    (void)list;
-    (void)index;
-    return &zod_yaml_none;
+    if (list->kind != ZOD_YAML_LIST || index >= list->as.list.count) {
+        return &zod_yaml_none;
+    }
+    return list->as.list.items[index];
 }
 
 const char *zod_yaml_key_at(const zod_yaml_node *map, size_t index) {
-    (void)map;
-    (void)index;
-    return NULL;
+    if (map->kind != ZOD_YAML_MAP || index >= map->as.map.count) {
+        return NULL;
+    }
+    return map->as.map.entries[index].key;
 }
 
 const zod_yaml_node *zod_yaml_val_at(const zod_yaml_node *map, size_t index) {
-    (void)map;
-    (void)index;
-    return &zod_yaml_none;
+    if (map->kind != ZOD_YAML_MAP || index >= map->as.map.count) {
+        return &zod_yaml_none;
+    }
+    return map->as.map.entries[index].value;
 }
 
 #endif
