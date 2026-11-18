@@ -83,6 +83,9 @@
  *   - Content under a skipped key must still be tab-free and must not contain a
  *     line that is just ---.
  *
+ * zod_yaml_str() on a map or list returns NULL and prints a warning to stderr.
+ * A missing key (none) stays silent. Override ZOD_YAML_WARN to redirect it.
+ *
  * Scalars are text. Callers convert. Maps keep insertion order.
  * Everything returned points into the document and lives until zod_yaml_free().
  */
@@ -180,9 +183,13 @@ const zod_yaml_node *zod_yaml_val_at(const zod_yaml_node *map, size_t index);
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef ZOD_YAML_WARN
+    #define ZOD_YAML_WARN(...) fprintf(stderr, __VA_ARGS__)
+#endif
+
 #define ZOD_YAML_AREA_BLOCK_CAP 4096
-#define ZOD_YAML_KEY_SEP        ':'
 #define ZOD_YAML_READ_CHUNK     4096
+#define ZOD_YAML_KEY_SEP        ':'
 #define ZOD_YAML_ITEM_MARK      '-'
 #define ZOD_YAML_QUOTE          '"'
 #define ZOD_YAML_ESCAPE         '\\'
@@ -653,11 +660,12 @@ static zod_yaml_internal_string_view zod_yaml_internal_flow_opener(
 }
 
 static int zod_yaml_internal_entry_skipped(const zod_yaml_internal_parser *parser,
-                                           zod_yaml_internal_string_view          text) {
+                                           zod_yaml_internal_string_view   text) {
     const zod_yaml_options       *options = parser->options;
     zod_yaml_internal_string_view key, value;
 
-    if (options == NULL || options->skip_keys == NULL || !zod_yaml_internal_split(text, &key, &value)) {
+    if (options == NULL || options->skip_keys == NULL ||
+        !zod_yaml_internal_split(text, &key, &value)) {
         return 0;
     }
     if (key.len >= 2 && key.data[0] == ZOD_YAML_QUOTE && key.data[key.len - 1] == ZOD_YAML_QUOTE) {
@@ -1724,6 +1732,10 @@ const zod_yaml_node *zod_yaml_root(const zod_yaml_doc *doc) {
 zod_yaml_kind zod_yaml_kind_of(const zod_yaml_node *node) { return node->kind; }
 
 const char *zod_yaml_str(const zod_yaml_node *node) {
+    if (node->kind == ZOD_YAML_MAP || node->kind == ZOD_YAML_LIST) {
+        ZOD_YAML_WARN("zod-yaml: zod_yaml_str needs a scalar, node is a %s\n",
+                      node->kind == ZOD_YAML_MAP ? "map" : "list");
+    }
     return node->kind == ZOD_YAML_SCALAR ? node->as.scalar.text : NULL;
 }
 
