@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#define LOAD_TEST_PATH "build/load_test.yaml"
 #define KEY_LINE_CAP   24
 #define DEPTH_TEXT_CAP 8192
 
@@ -364,7 +365,12 @@ static void test_parse_flow_errors(void) {
     expect_parse_error("a: [x, y\n", ZOD_YAML_ERR_SYNTAX, 1);
     expect_parse_error("a: [x y] z\n", ZOD_YAML_ERR_SYNTAX, 1);
     expect_parse_error("a: [x,, y]\n", ZOD_YAML_ERR_SYNTAX, 1);
-    expect_parse_error("a: [x,]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [,]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [x,,]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [x, ,]\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: {,}\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: {k: 1,,}\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [\n  x,,\n]\n", ZOD_YAML_ERR_SYNTAX, 2);
     expect_parse_error("a: [x}\n", ZOD_YAML_ERR_SYNTAX, 1);
     expect_parse_error("a: {k: 1]\n", ZOD_YAML_ERR_SYNTAX, 1);
     expect_parse_error("a: {k}\n", ZOD_YAML_ERR_SYNTAX, 1);
@@ -427,6 +433,159 @@ static void test_flow_next_line_column(void) {
 
     CHECK(zod_yaml_parse("a:\n  [x y] z\n", 13, &doc, &err) == ZOD_YAML_ERR_SYNTAX);
     CHECK(err.column == 9);
+    zod_yaml_free(doc);
+}
+
+static void test_flow_trailing_comma(void) {
+    const char *text =
+        "a: [x,]\n"
+        "b: [x, y, ]\n"
+        "c: [[1, 2,], 3,]\n"
+        "d: {k: 1,}\n"
+        "e: {k: 1, j: [p,], }\n"
+        "f: [\n"
+        "  p,\n"
+        "  q,\n"
+        "]\n"
+        "g: {\n"
+        "  k: v,\n"
+        "}\n"
+        "h: [\"a,\",]\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+
+    CHECK(zod_yaml_len(zod_yaml_get(root, "a")) == 1);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "b")) == 2);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "c")) == 2);
+    CHECK(zod_yaml_len(zod_yaml_at(zod_yaml_get(root, "c"), 0)) == 2);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "d")) == 1);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "e")) == 2);
+    CHECK(zod_yaml_len(zod_yaml_path(root, "e", "j", NULL)) == 1);
+    CHECK(zod_yaml_len(zod_yaml_get(root, "f")) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_get(root, "f"), 1)), "q") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "g", "k", NULL)), "v") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_get(root, "h"), 0)), "a,") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_flow_empty_value_error(void) {
+    expect_parse_error("a: {k: }\n", ZOD_YAML_ERR_SYNTAX, 1);
+}
+
+static void test_parse_multiline_flow(void) {
+    const char *text =
+        "a: [\n"
+        "  x,\n"
+        "  y\n"
+        "]\n"
+        "tags:\n"
+        "  [\n"
+        "    No-Auth,\n"
+        "    Match Stats\n"
+        "  ]\n"
+        "limit: {\n"
+        "    key: ip,\n"
+        "    in: { deep: [1, 2] }\n"
+        "  }\n"
+        "c: [\n"
+        "  p, # first\n"
+        "  # standalone\n"
+        "\n"
+        "  q\n"
+        "]\n"
+        "see: a [1 foo\n"
+        "outer:\n"
+        "  inner: [\n"
+        "  z\n"
+        "  ]\n"
+        "  next: 1\n"
+        "last: 2\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    const zod_yaml_node *a    = zod_yaml_get(root, "a");
+    const zod_yaml_node *tags = zod_yaml_get(root, "tags");
+    const zod_yaml_node *c    = zod_yaml_get(root, "c");
+
+    CHECK(zod_yaml_len(root) == 7);
+    CHECK(zod_yaml_len(a) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(a, 1)), "y") == 0);
+    CHECK(a->line == 1);
+    CHECK(zod_yaml_at(a, 1)->line == 3);
+    CHECK(zod_yaml_len(tags) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(tags, 1)), "Match Stats") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "limit", "key", NULL)), "ip") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_path(root, "limit", "in", "deep", NULL), 1)),
+                 "2") == 0);
+    CHECK(zod_yaml_len(c) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(c, 0)), "p") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(c, 1)), "q") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "see")), "a [1 foo") == 0);
+    CHECK(zod_yaml_len(zod_yaml_path(root, "outer", "inner", NULL)) == 1);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_path(root, "outer", "next", NULL)), "1") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "last")), "2") == 0);
+    zod_yaml_free(doc);
+}
+
+static void test_parse_multiline_items(void) {
+    const char *text =
+        "x-errors:\n"
+        "  - {\n"
+        "      code: \"forbidden\",\n"
+        "      message: \"Missing, or no: access\"\n"
+        "    }\n"
+        "  - { code: b }\n"
+        "  - key: [\n"
+        "      p,\n"
+        "      q\n"
+        "    ]\n"
+        "    other: 1\n"
+        "  - [\n"
+        "      m, n\n"
+        "    ]\n";
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse(text, strlen(text), &doc, &err) == ZOD_YAML_OK);
+
+    const zod_yaml_node *list = zod_yaml_get(zod_yaml_root(doc), "x-errors");
+
+    CHECK(zod_yaml_len(list) == 4);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 0), "message")),
+                 "Missing, or no: access") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 1), "code")), "b") == 0);
+    CHECK(zod_yaml_len(zod_yaml_get(zod_yaml_at(list, 2), "key")) == 2);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(list, 2), "other")), "1") == 0);
+    CHECK(zod_yaml_len(zod_yaml_at(list, 3)) == 2);
+    zod_yaml_free(doc);
+}
+
+static void test_multiline_flow_errors(void) {
+    expect_parse_error("a: [\n  x,\n", ZOD_YAML_ERR_SYNTAX, 1);
+    expect_parse_error("a: [\n  x}\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a: [\n  x\n] y\n", ZOD_YAML_ERR_SYNTAX, 3);
+    expect_parse_error("a: [\n\tx\n]\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a: [\n  x,, y\n]\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a: {\n  k: 1,\n  k: 2\n}\n", ZOD_YAML_ERR_DUPLICATE_KEY, 3);
+    expect_parse_error("a: [\n  *x\n]\n", ZOD_YAML_ERR_UNSUPPORTED, 2);
+    expect_parse_error("a: [\n  \"x\n]\n", ZOD_YAML_ERR_SYNTAX, 2);
+    expect_parse_error("a: [\n  x\n]\nb\n", ZOD_YAML_ERR_SYNTAX, 4);
+}
+
+static void test_multiline_error_column(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_parse("a: [\n  x\n] q\n", 13, &doc, &err) == ZOD_YAML_ERR_SYNTAX);
+    CHECK(err.line == 3);
+    CHECK(err.column == 3);
     zod_yaml_free(doc);
 }
 
@@ -586,6 +745,104 @@ static void expect_key_count(size_t count, zod_yaml_status want) {
 static void test_parse_entry_cap(void) {
     expect_key_count(ZOD_YAML_MAX_ENTRIES, ZOD_YAML_OK);
     expect_key_count(ZOD_YAML_MAX_ENTRIES + 1, ZOD_YAML_ERR_TOO_LARGE);
+}
+
+static void write_file(const char *content, size_t len) {
+    FILE *file = fopen(LOAD_TEST_PATH, "wb");
+
+    CHECK(file != NULL);
+    if (file == NULL) {
+        return;
+    }
+
+    fwrite(content, 1, len, file);
+    fclose(file);
+}
+
+static void test_load_file(void) {
+    const char    *text = "a: 1\nlist:\n  - x\n  - { k: v }\n";
+    zod_yaml_doc  *doc  = NULL;
+    zod_yaml_error err;
+
+    write_file(text, strlen(text));
+
+    CHECK(zod_yaml_load(LOAD_TEST_PATH, &doc, &err) == ZOD_YAML_OK);
+    CHECK(doc != NULL);
+
+    const zod_yaml_node *root = zod_yaml_root(doc);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(root, "a")), "1") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_at(zod_yaml_get(root, "list"), 0)), "x") == 0);
+    CHECK(strcmp(zod_yaml_str(zod_yaml_get(zod_yaml_at(zod_yaml_get(root, "list"), 1), "k")),
+                 "v") == 0);
+    zod_yaml_free(doc);
+    remove(LOAD_TEST_PATH);
+}
+
+static void test_load_empty_file(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    write_file("", 0);
+
+    CHECK(zod_yaml_load(LOAD_TEST_PATH, &doc, &err) == ZOD_YAML_OK);
+    CHECK(zod_yaml_kind_of(zod_yaml_root(doc)) == ZOD_YAML_NONE);
+    zod_yaml_free(doc);
+    remove(LOAD_TEST_PATH);
+}
+
+static void test_load_io_errors(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+
+    CHECK(zod_yaml_load("build/does_not_exist.yaml", &doc, &err) == ZOD_YAML_ERR_IO);
+    CHECK(doc == NULL);
+    CHECK(err.status == ZOD_YAML_ERR_IO);
+    CHECK(strstr(err.message, "does_not_exist") != NULL);
+
+    CHECK(zod_yaml_load(NULL, &doc, &err) == ZOD_YAML_ERR_IO);
+    CHECK(doc == NULL);
+
+    CHECK(zod_yaml_load("build", &doc, &err) == ZOD_YAML_ERR_IO);
+    CHECK(doc == NULL);
+}
+
+static void test_load_parse_error(void) {
+    zod_yaml_doc  *doc = NULL;
+    zod_yaml_error err;
+    const char    *text = "a: 1\nb\n";
+
+    write_file(text, strlen(text));
+
+    CHECK(zod_yaml_load(LOAD_TEST_PATH, &doc, &err) == ZOD_YAML_ERR_SYNTAX);
+    CHECK(doc == NULL);
+    CHECK(err.line == 2);
+    remove(LOAD_TEST_PATH);
+}
+
+static void test_load_size_limit(void) {
+    size_t sizes[]    = { ZOD_YAML_MAX_INPUT_BYTES, ZOD_YAML_MAX_INPUT_BYTES + 1 };
+    int    expected[] = { ZOD_YAML_OK, ZOD_YAML_ERR_TOO_LARGE };
+    char  *text       = malloc(ZOD_YAML_MAX_INPUT_BYTES + 1);
+
+    CHECK(text != NULL);
+    if (text == NULL) {
+        return;
+    }
+    memset(text, '\n', ZOD_YAML_MAX_INPUT_BYTES + 1);
+
+    for (size_t i = 0; i < 2; i++) {
+        zod_yaml_doc  *doc = NULL;
+        zod_yaml_error err;
+
+        write_file(text, sizes[i]);
+
+        CHECK((int)zod_yaml_load(LOAD_TEST_PATH, &doc, &err) == expected[i]);
+        CHECK((doc != NULL) == (expected[i] == ZOD_YAML_OK));
+        zod_yaml_free(doc);
+    }
+
+    remove(LOAD_TEST_PATH);
+    free(text);
 }
 
 static void test_parse_empty(void) {
@@ -827,6 +1084,12 @@ int main(void) {
     test_parse_flow_errors();
     test_parse_flow_key_lead();
     test_flow_error_column();
+    test_parse_multiline_flow();
+    test_parse_multiline_items();
+    test_multiline_flow_errors();
+    test_multiline_error_column();
+    test_flow_trailing_comma();
+    test_flow_empty_value_error();
     test_parse_flow_next_line();
     test_flow_next_line_errors();
     test_flow_next_line_column();
@@ -838,6 +1101,11 @@ int main(void) {
     test_parse_reserved_lead();
     test_reserved_lead_column();
     test_parse_reserved_inside();
+    test_load_file();
+    test_load_empty_file();
+    test_load_io_errors();
+    test_load_parse_error();
+    test_load_size_limit();
     test_parse_empty();
     test_free_null();
 

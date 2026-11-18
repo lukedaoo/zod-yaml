@@ -1,0 +1,193 @@
+# Regression fixture. Shapes mirror a real OpenAPI-style document, content is generic.
+# CHANGELOG:
+#   1st Jan, 2026: Draft
+spec: 3.0.3
+x-version: v1 # trailing comment: with colon, and (parens)
+info:
+  title: Sample API
+  version: 0.2.0
+
+tags:
+  - name: Alpha
+    description: Plain text, with commas. And a period.
+  - name: Beta Gamma
+    description: Colon without space is text, path /a/b, ratio 1:2.
+  - name: Delta
+    description: Long text with "inner quotes", it's, (parens), and a hash#inside.
+
+x-groups:
+  - name: Public
+    tags:
+      [
+        Alpha,
+        Beta Gamma,
+        Delta,
+      ]
+  - name: Internal
+    tags: [Delta]
+
+# Section comment
+x-clients:
+  web:
+    description: Browser app.
+    applies_to:
+      [
+        Alpha,
+        Beta Gamma,
+      ]
+    identity: Token. None on unknown
+  worker:
+    applies_to: [Delta]
+  unknown:
+    applies_to: []
+    identity: None / Rejected
+
+x-actors:
+  guest:
+    client: [web]
+    reaches:
+      [Alpha, Beta Gamma, Delta]
+    relations: [owner, editor, viewer]
+
+x-cors:
+  allowed_origins: [https://app.example]
+
+x-constants:
+  MAX_ITEMS: 10
+  MAX_SIZE: "5GB"
+  WINDOW_MINUTES: 30
+
+x-errors:
+  # Comment lines inside a block list
+  # continue here
+  - { code: "forbidden", status: 403, message: "Not allowed" }
+  - {
+      code: "not_found",
+      status: 404,
+      message: "Missing, or no access",
+    }
+  - { code: "limited", status: 429, message: "Too many requests (proposed)" }
+
+x-policy-defs:
+  # ---- Group one
+  pAccess.Read:
+    kind: permission
+    description: Level read or higher. Owner, grant, or token.
+    deny: "not_found"
+  pLimit.Max:
+    kind: constraint
+    constants: [MAX_ITEMS, MAX_SIZE]
+    deny: "limited"
+
+  # ---- Group two
+  pRate:
+    kind: throttle
+    deny: "limited"
+
+x-resource-defs:
+  rItem:
+    description: "Target of every item route."
+    entity: [Thing, Link]
+    read: "by level"
+    policies: [pAccess.Read, pLimit.Max]
+  rEmpty:
+    entity: []
+    policies: []
+
+paths:
+  # ------------------------------------------------------------- Section A
+  /a/create:
+    post:
+      tags: [Alpha]
+      summary: Create a thing (adults only)
+      x-behavior:
+        - First step, with a comma.
+        - Second step.
+      x-operation-id: sv_create
+      x-policies:
+        before_load:
+          - pLimit.Max
+          - pRate: { key: ip, limit: 10, window: 1h }
+        after_load:
+          - pAccess.Read
+      requestBody: { $ref: "#/components/requestBodies/Create" }
+      responses:
+        "201": { description: Created }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Limited" }
+
+  /a/items/{item_id}:
+    parameters:
+      - { $ref: "#/components/parameters/ItemId" }
+    get:
+      tags: [Alpha]
+      security: [{ TokenAuth: [] }]
+      x-policies:
+        after_load: [pAccess.Read]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+        "202": { description: Accepted. Sent if it exists. }
+
+  /b/list:
+    get:
+      tags: [Beta Gamma]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Item" }
+
+components:
+  securitySchemes:
+    TokenAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    KeyAuth: { type: apiKey, in: header, name: X-Key }
+
+  parameters:
+    ItemId:
+      { name: item_id, in: path, required: true, schema: { type: string } }
+    Key:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+
+  schemas:
+    Item:
+      type: object
+      properties:
+        id: { type: string }
+        status:
+          type: string
+          enum: [one, two, three]
+        color: { type: string } # TBD
+
+    Code:
+      type: string
+      enum:
+        - forbidden
+        - not_found
+
+    Wrapped:
+      allOf:
+        - $ref: "#/components/schemas/Item"
+
+    Request:
+      type: object
+      required: [assignments]
+      properties:
+        assignments:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [id, side]
+            properties:
+              id: { type: string }
+              side: { type: string, enum: [left, right, other] }
