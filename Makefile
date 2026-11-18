@@ -10,7 +10,7 @@ test: $(TESTBIN)
 	./$(TESTBIN)
 
 $(TESTBIN): test_zodyaml.c zodyaml.c zodyaml.h | $(BUILD)
-	$(CC) $(CFLAGS) test_zodyaml.c zodyaml.c -o $@
+	$(CC) $(CFLAGS) test_zodyaml.c -o $@
 
 $(BUILD):
 	mkdir -p $(BUILD)
