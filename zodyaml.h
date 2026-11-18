@@ -118,6 +118,8 @@ const zod_yaml_node *zod_yaml_val_at(const zod_yaml_node *map, size_t index);
 #include <string.h>
 
 #define ZOD_YAML_AREA_BLOCK_CAP 4096
+#define ZOD_YAML_DOC_MARKER     "---"
+#define ZOD_YAML_DOC_MARKER_LEN (sizeof(ZOD_YAML_DOC_MARKER) - 1)
 
 typedef struct zod_yaml_internal_block {
     struct zod_yaml_internal_block *next;
@@ -261,14 +263,15 @@ static const zod_yaml_node zod_yaml_none = {
     .as.scalar = { .text = NULL, .style = ZOD_YAML_PLAIN },
 };
 
-static void zod_yaml_set_error(zod_yaml_error *err, zod_yaml_status status, const char *message) {
+static void zod_yaml_set_error(zod_yaml_error *err, zod_yaml_status status, int line, int column,
+                               const char *message) {
     if (err == NULL) {
         return;
     }
 
     err->status = status;
-    err->line   = 0;
-    err->column = 0;
+    err->line   = line;
+    err->column = column;
     snprintf(err->message, ZOD_YAML_ERR_MSG_CAP, "%s", message);
 }
 
@@ -282,7 +285,7 @@ typedef struct zod_yaml_internal_parser {
     const char     *text;
     size_t          len;
     size_t          pos;
-    int             line_no;
+    int             line_number;
     zod_yaml_error *err;
 } zod_yaml_internal_parser;
 
@@ -292,28 +295,90 @@ typedef enum zod_yaml_internal_next {
     ZOD_YAML_NEXT_ERROR
 } zod_yaml_internal_next;
 
-/* TODO: stubs, tests drive the real code */
-static zod_yaml_status zod_yaml_internal_fail(zod_yaml_error *err, zod_yaml_status status,
-                                              int line, int column, const char *message) {
-    (void)line;
-    (void)column;
-    zod_yaml_set_error(err, status, message);
-    return status;
-}
-
 static void zod_yaml_internal_parser_init(zod_yaml_internal_parser *parser, const char *text,
                                           size_t len, zod_yaml_error *err) {
-    parser->text    = text;
-    parser->len     = len;
-    parser->pos     = 0;
-    parser->line_no = 0;
-    parser->err     = err;
+    parser->text        = text;
+    parser->len         = len;
+    parser->pos         = 0;
+    parser->line_number = 0;
+    parser->err         = err;
+}
+
+static size_t zod_yaml_internal_strip_len(const char *data, size_t len) {
+    int in_quotes = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        char ch = data[i];
+
+        if (in_quotes && ch == '\\') {
+            i++;
+            continue;
+        }
+
+        if (ch == '"') {
+            in_quotes = !in_quotes;
+            continue;
+        }
+
+        int starts_comment = ch == '#' && !in_quotes && (i == 0 || data[i - 1] == ' ');
+        if (starts_comment) {
+            len = i;
+            break;
+        }
+    }
+
+    while (len > 0 && (data[len - 1] == ' ' || data[len - 1] == '\r')) {
+        len--;
+    }
+    return len;
+}
+
+static int zod_yaml_internal_doc_marker(zod_yaml_internal_string_view text, int indent) {
+    if (indent != 0 || text.len < ZOD_YAML_DOC_MARKER_LEN ||
+        memcmp(text.data, ZOD_YAML_DOC_MARKER, ZOD_YAML_DOC_MARKER_LEN) != 0) {
+        return 0;
+    }
+    return text.len == ZOD_YAML_DOC_MARKER_LEN || text.data[ZOD_YAML_DOC_MARKER_LEN] == ' ';
 }
 
 static zod_yaml_internal_next zod_yaml_internal_next_line(zod_yaml_internal_parser *parser,
                                                           zod_yaml_internal_line   *line) {
-    (void)parser;
-    (void)line;
+    while (parser->pos < parser->len) {
+        const char *start = parser->text + parser->pos;
+        size_t      avail = parser->len - parser->pos;
+        const char *eol   = memchr(start, '\n', avail);
+        size_t      span  = eol != NULL ? (size_t)(eol - start) : avail;
+
+        parser->pos += eol != NULL ? span + 1 : span;
+        parser->line_number++;
+
+        size_t indent = 0;
+        while (indent < span && start[indent] == ' ') {
+            indent++;
+        }
+
+        if (indent < span && start[indent] == '\t') {
+            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, parser->line_number,
+                               (int)indent + 1, "tab in indentation");
+            return ZOD_YAML_NEXT_ERROR;
+        }
+
+        size_t text_len = zod_yaml_internal_strip_len(start + indent, span - indent);
+        if (text_len == 0) {
+            continue;
+        }
+
+        line->indent = (int)indent;
+        line->text   = zod_yaml_internal_sv(start + indent, text_len);
+        line->number = parser->line_number;
+
+        if (zod_yaml_internal_doc_marker(line->text, line->indent)) {
+            zod_yaml_set_error(parser->err, ZOD_YAML_ERR_SYNTAX, parser->line_number, 1,
+                               "document markers are not supported");
+            return ZOD_YAML_NEXT_ERROR;
+        }
+        return ZOD_YAML_NEXT_LINE;
+    }
     return ZOD_YAML_NEXT_END;
 }
 
@@ -322,18 +387,18 @@ zod_yaml_status zod_yaml_parse(const char *text, size_t len, zod_yaml_doc **doc,
     *doc = NULL;
 
     if (len > ZOD_YAML_MAX_INPUT_BYTES) {
-        zod_yaml_set_error(err, ZOD_YAML_ERR_TOO_LARGE, "input exceeds 5 MB");
+        zod_yaml_set_error(err, ZOD_YAML_ERR_TOO_LARGE, 0, 0, "input exceeds 5 MB");
         return ZOD_YAML_ERR_TOO_LARGE;
     }
 
     if (text == NULL && len != 0) {
-        zod_yaml_set_error(err, ZOD_YAML_ERR_SYNTAX, "text is NULL but len is not 0");
+        zod_yaml_set_error(err, ZOD_YAML_ERR_SYNTAX, 0, 0, "text is NULL but len is not 0");
         return ZOD_YAML_ERR_SYNTAX;
     }
 
     zod_yaml_doc *new_doc = calloc(1, sizeof(*new_doc));
     if (new_doc == NULL) {
-        zod_yaml_set_error(err, ZOD_YAML_ERR_NOMEM, "out of memory");
+        zod_yaml_set_error(err, ZOD_YAML_ERR_NOMEM, 0, 0, "out of memory");
         return ZOD_YAML_ERR_NOMEM;
     }
 
@@ -347,7 +412,7 @@ zod_yaml_status zod_yaml_load(const char *path, zod_yaml_doc **doc, zod_yaml_err
     (void)path;
 
     *doc = NULL;
-    zod_yaml_set_error(err, ZOD_YAML_ERR_UNSUPPORTED, "not implemented");
+    zod_yaml_set_error(err, ZOD_YAML_ERR_UNSUPPORTED, 0, 0, "not implemented");
     return ZOD_YAML_ERR_UNSUPPORTED;
 }
 

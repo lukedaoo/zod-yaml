@@ -120,13 +120,11 @@ static void test_parse_max_size_ok(void) {
     free(text);
 }
 
-static void test_fail_sets_position(void) {
+static void test_set_error_sets_position(void) {
     zod_yaml_error err;
 
-    zod_yaml_status status =
-        zod_yaml_internal_fail(&err, ZOD_YAML_ERR_SYNTAX, 7, 3, "bad");
+    zod_yaml_set_error(&err, ZOD_YAML_ERR_SYNTAX, 7, 3, "bad");
 
-    CHECK(status == ZOD_YAML_ERR_SYNTAX);
     CHECK(err.status == ZOD_YAML_ERR_SYNTAX);
     CHECK(err.line == 7);
     CHECK(err.column == 3);
@@ -159,10 +157,17 @@ static void expect_end(const char *text) {
 }
 
 static void expect_error(const char *text, int line_number) {
-    zod_yaml_internal_line line = { 0 };
-    zod_yaml_error         err;
+    zod_yaml_internal_parser parser;
+    zod_yaml_internal_line   line = { 0 };
+    zod_yaml_error           err;
+    zod_yaml_internal_next   next;
 
-    CHECK(scan_first(text, &line, &err) == ZOD_YAML_NEXT_ERROR);
+    zod_yaml_internal_parser_init(&parser, text, strlen(text), &err);
+    do {
+        next = zod_yaml_internal_next_line(&parser, &line);
+    } while (next == ZOD_YAML_NEXT_LINE);
+
+    CHECK(next == ZOD_YAML_NEXT_ERROR);
     CHECK(err.line == line_number);
 }
 
@@ -206,6 +211,7 @@ static void test_scan_comments(void) {
 static void test_scan_hash_needs_space(void) {
     expect_line("a: b#c\n", 0, "a: b#c", 1);
     expect_line("url: https://x/#frag\n", 0, "url: https://x/#frag", 1);
+    expect_line("url: https://x/#frag  #comment\n", 0, "url: https://x/#frag", 1);
 }
 
 static void test_scan_hash_in_quotes(void) {
@@ -225,7 +231,7 @@ static void test_scan_rejects_doc_marker(void) {
 }
 
 int main(void) {
-    test_fail_sets_position();
+    test_set_error_sets_position();
     test_scan_empty_input();
     test_scan_plain_line();
     test_scan_indent();
