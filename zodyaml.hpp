@@ -102,9 +102,13 @@ public:
     }
 
     static Document load(const char *path, std::initializer_list<const char *> skip_keys = {}) {
+        return load(path, skip_keys.begin(), skip_keys.size());
+    }
+
+    static Document load(const char *path, const char *const *skip_keys, std::size_t skip_count) {
         zod_yaml_doc          *raw = nullptr;
         zod_yaml_error         err = {};
-        const zod_yaml_options options = { skip_keys.begin(), skip_keys.size() };
+        const zod_yaml_options options = { skip_keys, skip_count };
         if (zod_yaml_load_opts(path, &raw, &err, &options) != ZOD_YAML_OK) {
             std::fprintf(stderr, "zod-yaml: %s:%d:%d: %s\n", path, err.line, err.column,
                          err.message);
